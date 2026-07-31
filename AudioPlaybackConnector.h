@@ -1,6 +1,7 @@
 #pragma once
 
 #include "resource.h"
+#include "VolumeBoost.hpp"
 
 using namespace winrt::Windows::Data::Json;
 using namespace winrt::Windows::Devices::Enumeration;
@@ -37,13 +38,11 @@ NOTIFYICONIDENTIFIER g_niid = {
 UINT WM_TASKBAR_CREATED = 0;
 bool g_reconnect = false;
 std::vector<std::wstring> g_lastDevices;
+float g_volumeBoost = 1.0f;
+std::wstring g_lastConnectedDeviceName;
+VolumeBoost g_volumeBoostMgr;
 
 #include "Util.hpp"
 #include "I18n.hpp"
 #include "SettingsUtil.hpp"
 #include "Direct2DSvg.hpp"
-#include "VolumeBoost.hpp"
-
-float g_volumeBoost = 1.0f;
-std::wstring g_lastConnectedDeviceName;
-VolumeBoost g_volumeBoostMgr;
