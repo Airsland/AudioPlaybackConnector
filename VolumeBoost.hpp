@@ -12,39 +12,6 @@
 #include <string_view>
 #include <vector>
 
-void NotifyVolumeBoostStatus(const wchar_t* title, const wchar_t* message);
-
-// Simple diagnostic logger. Writes to AudioPlaybackConnector.log next to the
-// exe so failures can be reported without a debugger.
-static void AppendVolumeBoostLog(const wchar_t* line)
-{
-	try
-	{
-		wchar_t exePath[MAX_PATH] = {};
-		const DWORD n = GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-		if (n == 0 || n >= MAX_PATH)
-			return;
-
-		wchar_t* slash = wcsrchr(exePath, L'\\');
-		if (!slash)
-			return;
-		const size_t remaining = MAX_PATH - static_cast<size_t>(slash + 1 - exePath);
-		wcscpy_s(slash + 1, remaining, L"AudioPlaybackConnector.log");
-
-		wil::unique_hfile hFile(CreateFileW(exePath, FILE_APPEND_DATA, FILE_SHARE_READ, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr));
-		if (!hFile)
-			return;
-
-		std::wstring entry(line);
-		entry += L"\r\n";
-		DWORD written = 0;
-		WriteFile(hFile.get(), entry.c_str(), static_cast<DWORD>(entry.size() * sizeof(wchar_t)), &written, nullptr);
-	}
-	catch (...)
-	{
-	}
-}
-
 static bool ContainsIgnoreCase(std::wstring_view haystack, std::wstring_view needle)
 {
 	if (needle.empty())
@@ -96,7 +63,6 @@ static std::wstring FindA2dpEndpointShortId()
 			{
 				if (ContainsIgnoreCase(name, L"A2DP"))
 				{
-					AppendVolumeBoostLog((L"VolumeBoost: found A2DP endpoint: " + std::wstring(name)).c_str());
 					return L"{0.0.1.00000000}." + std::wstring(subKeyName);
 				}
 			}
@@ -125,20 +91,20 @@ static float GainToDb(float gain)
 class VolumeBoost
 {
 public:
-	void Start(float gain, std::wstring_view)
+	void Start(float gainDb, std::wstring_view)
 	{
 		if (m_active || m_starting)
 			return;
 
-		m_gain = gain;
+		m_gainDb = gainDb;
 		m_stopped = false;
 		m_starting = true;
 		StartAsync();
 	}
 
-	void SetGain(float gain)
+	void SetGain(float gainDb)
 	{
-		m_gain = gain;
+		m_gainDb = gainDb;
 		if (m_active)
 			ApplyGain();
 	}
@@ -161,7 +127,7 @@ private:
 	bool ApplyGain();
 	void RestoreOriginalLevel();
 
-	float m_gain = 1.0f;
+	float m_gainDb = 0.0f;
 	float m_originalLevel = 0.0f;
 	bool m_haveOriginalLevel = false;
 	bool m_active = false;
@@ -175,7 +141,6 @@ winrt::fire_and_forget VolumeBoost::StartAsync()
 	{
 		if (attempt > 1)
 		{
-			AppendVolumeBoostLog((L"VolumeBoost: retrying (" + std::to_wstring(attempt) + L")...").c_str());
 			co_await winrt::resume_after(std::chrono::seconds(3));
 			if (m_stopped)
 				return;
@@ -184,15 +149,11 @@ winrt::fire_and_forget VolumeBoost::StartAsync()
 		if (ApplyGain())
 		{
 			m_starting = false;
-			AppendVolumeBoostLog(L"VolumeBoost: started");
-			NotifyVolumeBoostStatus(L"Volume boost", L"Volume boost enabled");
 			return;
 		}
 	}
 
 	m_starting = false;
-	AppendVolumeBoostLog(L"VolumeBoost: all attempts failed");
-	NotifyVolumeBoostStatus(L"Volume boost", L"Volume boost failed, see AudioPlaybackConnector.log");
 	Stop();
 }
 
@@ -203,7 +164,6 @@ bool VolumeBoost::ApplyGain()
 		std::wstring deviceId = FindA2dpEndpointShortId();
 		if (deviceId.empty())
 		{
-			AppendVolumeBoostLog(L"VolumeBoost: A2DP endpoint not found in registry");
 			return false;
 		}
 
@@ -220,7 +180,6 @@ bool VolumeBoost::ApplyGain()
 		{
 			volume->GetMasterVolumeLevel(&m_originalLevel);
 			m_haveOriginalLevel = true;
-			AppendVolumeBoostLog((L"VolumeBoost: original level " + std::to_wstring(static_cast<double>(m_originalLevel)) + L" dB").c_str());
 		}
 
 		float rangeMin = 0.0f;
@@ -228,35 +187,26 @@ bool VolumeBoost::ApplyGain()
 		float increment = 0.0f;
 		volume->GetVolumeRange(&rangeMin, &rangeMax, &increment);
 
-		// Boost is applied relative to the level the endpoint had before we
-		// took control, so the phone stream is always louder than the current
-		// "100%" state, regardless of what level Windows happens to have
-		// stored for this endpoint.
-		float target = m_originalLevel + GainToDb(m_gain);
+		// The slider sets the absolute endpoint level in dB; clamp it to the
+		// range the endpoint actually supports.
+		float target = m_gainDb;
 		if (target < rangeMin)
 			target = rangeMin;
 		if (target > rangeMax)
 			target = rangeMax;
 
 		winrt::check_hresult(volume->SetMasterVolumeLevel(target, nullptr));
-		AppendVolumeBoostLog((L"VolumeBoost: set level to " + std::to_wstring(static_cast<double>(target)) +
-			L" dB (original " + std::to_wstring(static_cast<double>(m_originalLevel)) +
-			L" dB + boost " + std::to_wstring(static_cast<double>(GainToDb(m_gain))) +
-			L" dB, range " + std::to_wstring(static_cast<double>(rangeMin)) +
-			L".." + std::to_wstring(static_cast<double>(rangeMax)) + L" dB)").c_str());
 		m_active = true;
 		return true;
 	}
-	catch (winrt::hresult_error const& ex)
+	catch (winrt::hresult_error const&)
 	{
 		LOG_CAUGHT_EXCEPTION();
-		AppendVolumeBoostLog((L"VolumeBoost: apply failed: " + std::wstring(ex.message())).c_str());
 		return false;
 	}
 	catch (...)
 	{
 		LOG_CAUGHT_EXCEPTION();
-		AppendVolumeBoostLog(L"VolumeBoost: apply failed");
 		return false;
 	}
 }
@@ -284,7 +234,6 @@ void VolumeBoost::RestoreOriginalLevel()
 			return;
 
 		volume->SetMasterVolumeLevel(m_originalLevel, nullptr);
-		AppendVolumeBoostLog(L"VolumeBoost: restored original level");
 		m_haveOriginalLevel = false;
 	}
 	CATCH_LOG();

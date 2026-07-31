@@ -3,21 +3,12 @@
 
 LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
 void SetupFlyout();
+void SetupVolumeBoostFlyout();
 void SetupMenu();
 winrt::fire_and_forget ConnectDevice(DevicePicker, std::wstring_view);
 void SetupDevicePicker();
 void SetupSvgIcon();
 void UpdateNotifyIcon();
-
-void NotifyVolumeBoostStatus(const wchar_t* title, const wchar_t* message)
-{
-	wcscpy_s(g_nid.szInfoTitle, title);
-	wcscpy_s(g_nid.szInfo, message);
-	g_nid.dwInfoFlags = NIIF_INFO;
-	g_nid.uFlags |= NIF_INFO;
-	Shell_NotifyIconW(NIM_MODIFY, &g_nid);
-	g_nid.uFlags &= ~NIF_INFO;
-}
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 	_In_opt_ HINSTANCE hPrevInstance,
@@ -78,6 +69,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 
 	LoadSettings();
 	SetupFlyout();
+	SetupVolumeBoostFlyout();
 	SetupMenu();
 	SetupDevicePicker();
 	SetupSvgIcon();
@@ -238,53 +230,118 @@ void SetupFlyout()
 	g_xamlFlyout = flyout;
 }
 
+// The slider covers the endpoint's full -96..+30 dB range, but the position
+// is not linear in dB. dB is already a logarithmic (perceptual) scale -
+// +10 dB is roughly "twice as loud" - and Windows applies a further taper to
+// its own volume sliders so that the region around 0 dB (the normal 100%
+// level) and above gets most of the slider travel. We replicate that curve
+// (position = normalizedDb^2.29), which matches the mapping Windows itself
+// uses for IAudioEndpointVolume.
+static constexpr float kBoostRangeMin = -96.0f;
+static constexpr float kBoostRangeMax = 30.0f;
+static constexpr float kBoostSliderMax = 1000.0f;
+static constexpr float kBoostTaper = 2.29f;
+
+static float BoostSliderToDb(float position)
+{
+	float p = position / kBoostSliderMax;
+	if (p < 0.0f)
+		p = 0.0f;
+	else if (p > 1.0f)
+		p = 1.0f;
+	float n = std::pow(p, 1.0f / kBoostTaper);
+	return kBoostRangeMin + n * (kBoostRangeMax - kBoostRangeMin);
+}
+
+static float BoostDbToSlider(float db)
+{
+	float n = (db - kBoostRangeMin) / (kBoostRangeMax - kBoostRangeMin);
+	if (n < 0.0f)
+		n = 0.0f;
+	else if (n > 1.0f)
+		n = 1.0f;
+	return std::pow(n, kBoostTaper) * kBoostSliderMax;
+}
+
+static void UpdateBoostLabel()
+{
+	wchar_t buf[64] = {};
+	swprintf(buf, 64, L"Gain: %+.1f dB", static_cast<double>(g_volumeBoostDb));
+	g_volumeBoostLabel.Text(buf);
+}
+
+void SetupVolumeBoostFlyout()
+{
+	TextBlock label;
+	label.Margin({ 0, 0, 0, 10 });
+
+	Slider slider;
+	slider.Minimum(0);
+	slider.Maximum(kBoostSliderMax);
+	slider.Value(BoostDbToSlider(g_volumeBoostDb));
+	slider.Width(260);
+	slider.ValueChanged([](const auto&, const auto& args) {
+		g_volumeBoostDb = BoostSliderToDb(static_cast<float>(args.NewValue()));
+		if (std::fabs(g_volumeBoostDb) < 0.05f)
+		{
+			g_volumeBoostDb = 0.0f;
+			g_volumeBoostMgr.Stop();
+		}
+		else if (g_volumeBoostMgr.IsActive())
+			g_volumeBoostMgr.SetGain(g_volumeBoostDb);
+		else
+			g_volumeBoostMgr.Start(g_volumeBoostDb, g_lastConnectedDeviceName);
+		UpdateBoostLabel();
+	});
+
+	Button resetButton;
+	resetButton.Content(winrt::box_value(_(L"Reset to 0 dB")));
+	resetButton.HorizontalAlignment(HorizontalAlignment::Right);
+	resetButton.Click([](const auto&, const auto&) {
+		g_volumeBoostSlider.Value(BoostDbToSlider(0.0f));
+		g_volumeBoostDb = 0.0f;
+		g_volumeBoostMgr.Stop();
+		UpdateBoostLabel();
+	});
+
+	StackPanel stackPanel;
+	stackPanel.Children().Append(label);
+	stackPanel.Children().Append(slider);
+	stackPanel.Children().Append(resetButton);
+
+	Flyout flyout;
+	flyout.ShouldConstrainToRootBounds(false);
+	flyout.Content(stackPanel);
+	flyout.Closed([](const auto&, const auto&) {
+		SaveSettings();
+	});
+
+	g_volumeBoostLabel = label;
+	g_volumeBoostSlider = slider;
+	g_volumeBoostFlyout = flyout;
+	UpdateBoostLabel();
+}
+
 void SetupMenu()
 {
 	// https://docs.microsoft.com/en-us/windows/uwp/design/style/segoe-ui-symbol-font
-	MenuFlyoutSubItem boostItem;
-	boostItem.Text(_(L"Volume boost"));
-
 	FontIcon boostIcon;
 	boostIcon.Glyph(L"\xE767");
+	MenuFlyoutItem boostItem;
+	boostItem.Text(_(L"Volume boost"));
 	boostItem.Icon(boostIcon);
-
-	const std::pair<float, const wchar_t*> boostOptions[] = {
-		{ 1.0f, L"Off" },
-		{ 1.5f, L"1.5x" },
-		{ 2.0f, L"2x" },
-		{ 3.0f, L"3x" },
-		{ 4.0f, L"4x" },
-		{ 6.0f, L"6x" },
-	};
-	auto boostSubItem = boostItem;
-	for (const auto& option : boostOptions)
-	{
-		ToggleMenuFlyoutItem item;
-		item.Text(_(option.second));
-		item.IsChecked(g_volumeBoost == option.first);
-		item.Click([boostSubItem, gain = option.first](const auto& sender, const auto&) {
-			auto clicked = sender.as<ToggleMenuFlyoutItem>();
-			for (auto const& i : boostSubItem.Items())
-			{
-				if (auto toggle = i.try_as<ToggleMenuFlyoutItem>())
-					toggle.IsChecked(toggle == clicked);
-			}
-			g_volumeBoost = gain;
-			SaveSettings();
-			if (gain > 1.0f)
-			{
-				if (g_volumeBoostMgr.IsActive())
-					g_volumeBoostMgr.SetGain(gain);
-				else if (!g_lastConnectedDeviceName.empty())
-					g_volumeBoostMgr.Start(gain, g_lastConnectedDeviceName);
-			}
-			else
-			{
-				g_volumeBoostMgr.Stop();
-			}
-		});
-		boostItem.Items().Append(item);
-	}
+	boostItem.Click([](const auto&, const auto&) {
+		POINT pt;
+		GetCursorPos(&pt);
+		auto dpi = GetDpiForWindow(g_hWnd);
+		Point point = {
+			static_cast<float>(pt.x * USER_DEFAULT_SCREEN_DPI / dpi),
+			static_cast<float>(pt.y * USER_DEFAULT_SCREEN_DPI / dpi)
+		};
+		winrt::Windows::UI::Xaml::Controls::Primitives::FlyoutShowOptions options;
+		options.Position(point);
+		g_volumeBoostFlyout.ShowAt(g_xamlCanvas, options);
+	});
 
 	FontIcon settingsIcon;
 	settingsIcon.Glyph(L"\xE713");
@@ -427,8 +484,8 @@ winrt::fire_and_forget ConnectDevice(DevicePicker picker, DeviceInformation devi
 	{
 		g_lastConnectedDeviceName = std::wstring(device.Name());
 		picker.SetDisplayStatus(device, _(L"Connected"), DevicePickerDisplayStatusOptions::ShowDisconnectButton);
-		if (g_volumeBoost > 1.0f)
-			g_volumeBoostMgr.Start(g_volumeBoost, device.Name());
+		if (std::fabs(g_volumeBoostDb) > 0.05f)
+			g_volumeBoostMgr.Start(g_volumeBoostDb, device.Name());
 	}
 	else
 	{

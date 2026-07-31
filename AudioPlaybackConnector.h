@@ -20,8 +20,11 @@ HWND g_hWnd;
 HWND g_hWndXaml;
 Canvas g_xamlCanvas = nullptr;
 Flyout g_xamlFlyout = nullptr;
+Flyout g_volumeBoostFlyout = nullptr;
 MenuFlyout g_xamlMenu = nullptr;
 FocusState g_menuFocusState = FocusState::Unfocused;
+TextBlock g_volumeBoostLabel = nullptr;
+Slider g_volumeBoostSlider = nullptr;
 DevicePicker g_devicePicker = nullptr;
 std::unordered_map<std::wstring, std::pair<DeviceInformation, AudioPlaybackConnection>> g_audioPlaybackConnections;
 HICON g_hIconLight = nullptr;
@@ -38,7 +41,7 @@ NOTIFYICONIDENTIFIER g_niid = {
 UINT WM_TASKBAR_CREATED = 0;
 bool g_reconnect = false;
 std::vector<std::wstring> g_lastDevices;
-float g_volumeBoost = 1.0f;
+float g_volumeBoostDb = 0.0f;
 std::wstring g_lastConnectedDeviceName;
 VolumeBoost g_volumeBoostMgr;
 
