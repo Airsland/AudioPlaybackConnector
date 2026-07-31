@@ -8,6 +8,7 @@
 #include <functiondiscoverykeys_devpkey.h>
 
 #include <cwchar>
+#include <chrono>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -122,6 +123,7 @@ public:
 
 private:
 	winrt::fire_and_forget StartAsync();
+	winrt::Windows::Foundation::IAsyncOperation<bool> TryStartAsync();
 	void MuteOriginalSessions();
 	void UnmuteOriginalSessions();
 
@@ -163,8 +165,9 @@ static std::wstring GetDeviceId(IMMDevice* device)
 }
 
 // Fallback: the A2DP Sink recording endpoint may be hidden from the Sound
-// settings UI (Windows 11), so also search active capture endpoints through
-// the low-level Core Audio API.
+// settings UI (Windows 11) and only becomes active while audio is streaming,
+// so search ALL capture endpoints (any device state) through the low-level
+// Core Audio API.
 static std::wstring FindCaptureEndpointByName(std::wstring_view deviceName)
 {
 	std::wstring fallback;
@@ -175,15 +178,19 @@ static std::wstring FindCaptureEndpointByName(std::wstring_view deviceName)
 		winrt::check_hresult(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(enumerator.put())));
 
 		winrt::com_ptr<IMMDeviceCollection> collection;
-		winrt::check_hresult(enumerator->EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE, collection.put()));
+		winrt::check_hresult(enumerator->EnumAudioEndpoints(eCapture, DEVICE_STATE_ALL, collection.put()));
 
 		UINT count = 0;
 		winrt::check_hresult(collection->GetCount(&count));
+		AppendVolumeBoostLog((L"VolumeBoost: WASAPI enumerated " + std::to_wstring(count) + L" capture endpoints").c_str());
 
 		for (UINT i = 0; i < count; ++i)
 		{
 			winrt::com_ptr<IMMDevice> device;
 			winrt::check_hresult(collection->Item(i, device.put()));
+
+			DWORD state = 0;
+			device->GetState(&state);
 
 			std::wstring name;
 			winrt::com_ptr<IPropertyStore> store;
@@ -196,19 +203,21 @@ static std::wstring FindCaptureEndpointByName(std::wstring_view deviceName)
 				PropVariantClear(&var);
 			}
 
+			AppendVolumeBoostLog((L"VolumeBoost: WASAPI endpoint state=" + std::to_wstring(state) + L" name=" + name).c_str());
+
 			if (!ContainsIgnoreCase(name, L"A2DP"))
 				continue;
 
 			if (ContainsIgnoreCase(name, deviceName))
 			{
-				AppendVolumeBoostLog((L"VolumeBoost: found endpoint by WinRT (exact): " + name).c_str());
+				AppendVolumeBoostLog((L"VolumeBoost: found endpoint by WASAPI (exact): " + name).c_str());
 				return GetDeviceId(device.get());
 			}
 			if (fallback.empty())
 				fallback = GetDeviceId(device.get());
 		}
 		if (!fallback.empty())
-			AppendVolumeBoostLog(L"VolumeBoost: found endpoint by WinRT (fallback name match)");
+			AppendVolumeBoostLog(L"VolumeBoost: found endpoint by WASAPI (fallback name match)");
 	}
 	CATCH_LOG();
 
@@ -223,10 +232,12 @@ static winrt::Windows::Devices::Enumeration::DeviceInformation FindCaptureInputD
 	{
 		auto devices = winrt::Windows::Devices::Enumeration::DeviceInformation::FindAllAsync(
 			winrt::Windows::Media::Devices::MediaDevice::GetAudioCaptureSelector()).get();
+		AppendVolumeBoostLog((L"VolumeBoost: WinRT enumerated " + std::to_wstring(devices.Size()) + L" capture endpoints").c_str());
 
 		for (auto const& device : devices)
 		{
 			std::wstring name(device.Name());
+			AppendVolumeBoostLog((L"VolumeBoost: WinRT endpoint name=" + name).c_str());
 			if (!ContainsIgnoreCase(name, L"A2DP"))
 				continue;
 
@@ -269,17 +280,55 @@ static winrt::Windows::Devices::Enumeration::DeviceInformation FindCaptureInputD
 
 winrt::fire_and_forget VolumeBoost::StartAsync()
 {
+	for (int attempt = 1; attempt <= 15 && !m_stopped; ++attempt)
+	{
+		if (attempt > 1)
+		{
+			AppendVolumeBoostLog((L"VolumeBoost: retrying (" + std::to_wstring(attempt) + L")...").c_str());
+			co_await winrt::resume_after(std::chrono::seconds(3));
+			if (m_stopped)
+				return;
+		}
+
+		try
+		{
+			if (co_await TryStartAsync())
+			{
+				m_active = true;
+				m_starting = false;
+				AppendVolumeBoostLog(L"VolumeBoost: started");
+				NotifyVolumeBoostStatus(L"Volume boost", L"Volume boost enabled");
+				return;
+			}
+		}
+		catch (winrt::hresult_error const& ex)
+		{
+			LOG_CAUGHT_EXCEPTION();
+			AppendVolumeBoostLog((L"VolumeBoost: attempt threw: " + std::wstring(ex.message())).c_str());
+		}
+	}
+
+	m_starting = false;
+	AppendVolumeBoostLog(L"VolumeBoost: all attempts failed");
+	NotifyVolumeBoostStatus(L"Volume boost", L"Volume boost failed, see AudioPlaybackConnector.log");
+	Stop();
+}
+
+winrt::Windows::Foundation::IAsyncOperation<bool> VolumeBoost::TryStartAsync()
+{
 	try
 	{
 		auto inputDevice = FindCaptureInputDevice(m_deviceName);
 		if (!inputDevice)
 		{
 			AppendVolumeBoostLog(L"VolumeBoost: A2DP SNK capture endpoint not found");
-			OutputDebugStringW(L"VolumeBoost: A2DP SNK capture endpoint not found.\n");
-			NotifyVolumeBoostStatus(L"Volume boost", L"未找到 A2DP 采集端点，增益未启用");
-			Stop();
-			return;
+			co_return false;
 		}
+
+		// Reset any leftover nodes from a previous failed attempt.
+		m_inputNode = nullptr;
+		m_outputNode = nullptr;
+		m_graph = nullptr;
 
 		// Mute the system's original rendering of the stream before the
 		// audio graph creates its own output session, so we never mute the
@@ -287,19 +336,16 @@ winrt::fire_and_forget VolumeBoost::StartAsync()
 		// stream session or our own process sessions) are muted here.
 		MuteOriginalSessions();
 		if (m_stopped)
-			return;
+			co_return false;
 
 		winrt::Windows::Media::Audio::AudioGraphSettings settings(winrt::Windows::Media::Render::AudioRenderCategory::Media);
 		auto createResult = co_await winrt::Windows::Media::Audio::AudioGraph::CreateAsync(settings);
 		if (m_stopped)
-			return;
+			co_return false;
 		if (createResult.Status() != winrt::Windows::Media::Audio::AudioGraphCreationStatus::Success)
 		{
 			AppendVolumeBoostLog(L"VolumeBoost: AudioGraph creation failed");
-			OutputDebugStringW(L"VolumeBoost: AudioGraph creation failed.\n");
-			NotifyVolumeBoostStatus(L"Volume boost", L"音频图创建失败，增益未启用");
-			Stop();
-			return;
+			co_return false;
 		}
 		m_graph = createResult.Graph();
 
@@ -318,27 +364,21 @@ winrt::fire_and_forget VolumeBoost::StartAsync()
 				inputDevice);
 		}
 		if (m_stopped)
-			return;
+			co_return false;
 		if (inputResult.Status() != winrt::Windows::Media::Audio::AudioDeviceNodeCreationStatus::Success)
 		{
 			AppendVolumeBoostLog((L"VolumeBoost: input node failed at 48000, hr=" + std::to_wstring(static_cast<int32_t>(inputResult.ExtendedError()))).c_str());
-			OutputDebugStringW(L"VolumeBoost: input node creation failed.\n");
-			NotifyVolumeBoostStatus(L"Volume boost", L"采集节点创建失败（可能在隐私设置中被拒绝）");
-			Stop();
-			return;
+			co_return false;
 		}
 		m_inputNode = inputResult.DeviceInputNode();
 
 		auto outputResult = co_await m_graph.CreateDeviceOutputNodeAsync();
 		if (m_stopped)
-			return;
+			co_return false;
 		if (outputResult.Status() != winrt::Windows::Media::Audio::AudioDeviceNodeCreationStatus::Success)
 		{
 			AppendVolumeBoostLog((L"VolumeBoost: output node failed, hr=" + std::to_wstring(static_cast<int32_t>(outputResult.ExtendedError()))).c_str());
-			OutputDebugStringW(L"VolumeBoost: output node creation failed.\n");
-			NotifyVolumeBoostStatus(L"Volume boost", L"输出节点创建失败");
-			Stop();
-			return;
+			co_return false;
 		}
 		m_outputNode = outputResult.DeviceOutputNode();
 
@@ -346,22 +386,19 @@ winrt::fire_and_forget VolumeBoost::StartAsync()
 		m_outputNode.OutgoingGain(m_gain);
 		m_graph.Start();
 
-		m_active = true;
-		m_starting = false;
-		OutputDebugStringW(L"VolumeBoost: started.\n");
-		AppendVolumeBoostLog(L"VolumeBoost: started");
-		NotifyVolumeBoostStatus(L"Volume boost", L"增益已启用");
+		co_return true;
 	}
 	catch (winrt::hresult_error const& ex)
 	{
 		LOG_CAUGHT_EXCEPTION();
-		OutputDebugStringW(ex.message().c_str());
-		Stop();
+		AppendVolumeBoostLog((L"VolumeBoost: TryStartAsync threw: " + std::wstring(ex.message())).c_str());
+		co_return false;
 	}
 	catch (...)
 	{
 		LOG_CAUGHT_EXCEPTION();
-		Stop();
+		AppendVolumeBoostLog(L"VolumeBoost: TryStartAsync threw");
+		co_return false;
 	}
 }
 
@@ -413,13 +450,22 @@ void VolumeBoost::MuteOriginalSessions()
 
 			auto volume = control.try_as<ISimpleAudioVolume>();
 			if (volume && SUCCEEDED(volume->SetMute(TRUE, nullptr)))
+			{
+				float level = 0.0f;
+				BOOL isMuted = FALSE;
+				volume->GetMasterVolume(&level);
+				volume->GetMute(&isMuted);
+				AppendVolumeBoostLog((L"VolumeBoost: session pid=" + std::to_wstring(pid) +
+					L" vol=" + std::to_wstring(static_cast<double>(level)) +
+					L" muted=" + std::to_wstring(isMuted) +
+					L" name=" + displayName).c_str());
 				m_mutedSessions.push_back(std::move(control));
+			}
 		}
 
 		AppendVolumeBoostLog((L"VolumeBoost: muted " + std::to_wstring(m_mutedSessions.size()) + L" session(s)").c_str());
 	}
 	CATCH_LOG();
-	m_mutedSessions.clear();
 }
 
 void VolumeBoost::UnmuteOriginalSessions()
