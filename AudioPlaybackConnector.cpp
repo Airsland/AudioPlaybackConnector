@@ -3,8 +3,8 @@
 
 LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
 void SetupFlyout();
-void SetupVolumeBoostFlyout();
 void SetupMenu();
+void ShowDevicePicker();
 winrt::fire_and_forget ConnectDevice(DevicePicker, std::wstring_view);
 void SetupDevicePicker();
 void SetupSvgIcon();
@@ -69,7 +69,6 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 
 	LoadSettings();
 	SetupFlyout();
-	SetupVolumeBoostFlyout();
 	SetupMenu();
 	SetupDevicePicker();
 	SetupSvgIcon();
@@ -102,23 +101,35 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
 	switch (message)
 	{
+	case WM_ACTIVATE:
+		// The helper window hosts XAML flyouts; whenever it loses activation
+		// (user clicks elsewhere, the shell's tray overflow popup closes,
+		// etc.) dismiss any open popup and hide the window so it can never
+		// remain floating on screen.
+		if (LOWORD(wParam) == WA_INACTIVE)
+		{
+			if (g_xamlMenu)
+				g_xamlMenu.Hide();
+			if (g_xamlFlyout)
+				g_xamlFlyout.Hide();
+			ShowWindow(g_hWnd, SW_HIDE);
+		}
+		break;
 	case WM_DESTROY:
 		g_volumeBoostMgr.Stop();
-		for (const auto& connection : g_audioPlaybackConnections)
 		{
-			connection.second.second.Close();
-			g_devicePicker.SetDisplayStatus(connection.second.first, {}, DevicePickerDisplayStatusOptions::None);
-		}
-		if (g_reconnect)
-		{
-			SaveSettings();
+			// Move the map out first: closing a connection can fire
+			// StateChanged(Closed) synchronously, which erases from the map
+			// and would invalidate the iteration below.
+			auto connections = std::move(g_audioPlaybackConnections);
 			g_audioPlaybackConnections.clear();
+			for (const auto& connection : connections)
+			{
+				connection.second.second.Close();
+				g_devicePicker.SetDisplayStatus(connection.second.first, {}, DevicePickerDisplayStatusOptions::None);
+			}
 		}
-		else
-		{
-			g_audioPlaybackConnections.clear();
-			SaveSettings();
-		}
+		SaveSettings();
 		Shell_NotifyIconW(NIM_DELETE, &g_nid);
 		PostQuitMessage(0);
 		break;
@@ -133,49 +144,32 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 		{
 		case NIN_SELECT:
 		case NIN_KEYSELECT:
-		{
-			using namespace winrt::Windows::UI::Popups;
-
-			RECT iconRect;
-			auto hr = Shell_NotifyIconGetRect(&g_niid, &iconRect);
-			if (FAILED(hr))
-			{
-				LOG_HR(hr);
-				break;
-			}
-
-			auto dpi = GetDpiForWindow(hWnd);
-			Rect rect = {
-				static_cast<float>(iconRect.left * USER_DEFAULT_SCREEN_DPI / dpi),
-				static_cast<float>(iconRect.top * USER_DEFAULT_SCREEN_DPI / dpi),
-				static_cast<float>((iconRect.right - iconRect.left) * USER_DEFAULT_SCREEN_DPI / dpi),
-				static_cast<float>((iconRect.bottom - iconRect.top) * USER_DEFAULT_SCREEN_DPI / dpi)
-			};
-
-			SetWindowPos(hWnd, HWND_TOPMOST, 0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN), SWP_HIDEWINDOW);
-			SetForegroundWindow(hWnd);
-			g_devicePicker.Show(rect, Placement::Above);
-		}
-		break;
-		case WM_RBUTTONUP: // Menu activated by mouse click
-			g_menuFocusState = FocusState::Pointer;
+			ShowDevicePicker();
 			break;
 		case WM_CONTEXTMENU:
 		{
-			if (g_menuFocusState == FocusState::Unfocused)
-				g_menuFocusState = FocusState::Keyboard;
-
 			auto dpi = GetDpiForWindow(hWnd);
+			POINT pt;
+			pt.x = GET_X_LPARAM(wParam);
+			pt.y = GET_Y_LPARAM(wParam);
+			if (pt.x == 0 && pt.y == 0)
+				GetCursorPos(&pt);
 			Point point = {
-				static_cast<float>(GET_X_LPARAM(wParam) * USER_DEFAULT_SCREEN_DPI / dpi),
-				static_cast<float>(GET_Y_LPARAM(wParam) * USER_DEFAULT_SCREEN_DPI / dpi)
+				static_cast<float>(pt.x * USER_DEFAULT_SCREEN_DPI / dpi),
+				static_cast<float>(pt.y * USER_DEFAULT_SCREEN_DPI / dpi)
 			};
 
+			// Reset the helper window back to the origin before showing the
+			// menu, otherwise a previous exit-confirm flyout may have moved
+			// it next to the tray icon and the menu would be offset.
+			SetWindowPos(g_hWnd, nullptr, 0, 0, 0, 0, SWP_NOZORDER | SWP_HIDEWINDOW | SWP_NOSIZE);
 			SetWindowPos(g_hWndXaml, 0, 0, 0, 0, 0, SWP_NOZORDER | SWP_SHOWWINDOW);
 			SetWindowPos(g_hWnd, HWND_TOPMOST, 0, 0, 1, 1, SWP_SHOWWINDOW);
 			SetForegroundWindow(hWnd);
 
-			g_xamlMenu.ShowAt(g_xamlCanvas, point);
+			winrt::Windows::UI::Xaml::Controls::Primitives::FlyoutShowOptions options;
+			options.Position(point);
+			g_xamlMenu.ShowAt(g_xamlCanvas, options);
 		}
 		break;
 		}
@@ -226,6 +220,9 @@ void SetupFlyout()
 	Flyout flyout;
 	flyout.ShouldConstrainToRootBounds(false);
 	flyout.Content(stackPanel);
+	flyout.Closed([](const auto&, const auto&) {
+		ShowWindow(g_hWnd, SW_HIDE);
+	});
 
 	g_xamlFlyout = flyout;
 }
@@ -263,24 +260,133 @@ static float BoostDbToSlider(float db)
 	return std::pow(n, kBoostTaper) * kBoostSliderMax;
 }
 
-static void UpdateBoostLabel()
+static bool IsLightTheme()
 {
-	wchar_t buf[64] = {};
-	swprintf(buf, 64, L"Gain: %+.1f dB", static_cast<double>(g_volumeBoostDb));
-	g_volumeBoostLabel.Text(buf);
+	DWORD value = 0, cbValue = sizeof(value);
+	RegGetValueW(HKEY_CURRENT_USER, LR"(Software\Microsoft\Windows\CurrentVersion\Themes\Personalize)", L"SystemUsesLightTheme", RRF_RT_REG_DWORD, nullptr, &value, &cbValue);
+	return value != 0;
 }
 
-void SetupVolumeBoostFlyout()
+static winrt::Windows::UI::Color Argb(BYTE a, BYTE r, BYTE g, BYTE b)
 {
+	winrt::Windows::UI::Color c = {};
+	c.A = a;
+	c.R = r;
+	c.G = g;
+	c.B = b;
+	return c;
+}
+
+// A clickable menu row (icon + label) with hover feedback.
+static Button MakeMenuRow(const wchar_t* text, const wchar_t* glyph, SolidColorBrush hoverBrush, RoutedEventHandler handler)
+{
+	FontIcon icon;
+	icon.Glyph(glyph);
+	icon.FontSize(14);
+	icon.VerticalAlignment(VerticalAlignment::Center);
+
 	TextBlock label;
-	label.Margin({ 0, 0, 0, 10 });
+	label.Text(_(text));
+	label.Margin({ 8, 0, 0, 0 });
+	label.VerticalAlignment(VerticalAlignment::Center);
+
+	StackPanel panel;
+	panel.Orientation(Orientation::Horizontal);
+	panel.Children().Append(icon);
+	panel.Children().Append(label);
+
+	Button button;
+	button.Content(panel);
+	button.Background(nullptr);
+	button.BorderThickness({ 0, 0, 0, 0 });
+	button.HorizontalAlignment(HorizontalAlignment::Stretch);
+	button.HorizontalContentAlignment(HorizontalAlignment::Left);
+	button.Padding({ 10, 7, 10, 7 });
+	button.CornerRadius({ 4, 4, 4, 4 });
+	button.Click(handler);
+	button.PointerEntered([hoverBrush](const auto& sender, const auto&) {
+		sender.as<Button>().Background(hoverBrush);
+	});
+	button.PointerExited([](const auto& sender, const auto&) {
+		sender.as<Button>().Background(nullptr);
+	});
+	return button;
+}
+
+void ShowDevicePicker()
+{
+	using namespace winrt::Windows::UI::Popups;
+
+	RECT iconRect;
+	auto hr = Shell_NotifyIconGetRect(&g_niid, &iconRect);
+	if (FAILED(hr))
+	{
+		LOG_HR(hr);
+		return;
+	}
+
+	auto dpi = GetDpiForWindow(g_hWnd);
+	Rect rect = {
+		static_cast<float>(iconRect.left * USER_DEFAULT_SCREEN_DPI / dpi),
+		static_cast<float>(iconRect.top * USER_DEFAULT_SCREEN_DPI / dpi),
+		static_cast<float>((iconRect.right - iconRect.left) * USER_DEFAULT_SCREEN_DPI / dpi),
+		static_cast<float>((iconRect.bottom - iconRect.top) * USER_DEFAULT_SCREEN_DPI / dpi)
+	};
+
+	SetWindowPos(g_hWnd, HWND_TOPMOST, 0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN), SWP_HIDEWINDOW);
+	SetForegroundWindow(g_hWnd);
+	g_devicePicker.Show(rect, Placement::Above);
+}
+
+void SetupMenu()
+{
+	const bool light = IsLightTheme();
+
+	SolidColorBrush bgBrush;
+	bgBrush.Color(Argb(255, light ? 247 : 32, light ? 247 : 32, light ? 249 : 32));
+	SolidColorBrush borderBrush;
+	borderBrush.Color(Argb(255, light ? 232 : 60, light ? 232 : 60, light ? 232 : 60));
+	SolidColorBrush hoverBrush;
+	hoverBrush.Color(Argb(255, light ? 224 : 48, light ? 224 : 48, light ? 224 : 48));
+	SolidColorBrush textBrush;
+	textBrush.Color(Argb(255, light ? 27 : 243, light ? 27 : 243, light ? 27 : 243));
+	SolidColorBrush subtextBrush;
+	subtextBrush.Color(Argb(255, light ? 96 : 170, light ? 96 : 170, light ? 96 : 170));
+
+	TextBlock title;
+	title.Text(_(L"AudioPlaybackConnector"));
+	title.Foreground(textBrush);
+	title.Margin({ 10, 4, 10, 6 });
+
+	// Volume header: caption on the left, current level on the right.
+	Grid volumeHeader;
+	volumeHeader.Margin({ 10, 8, 10, 0 });
+	ColumnDefinition columnCaption;
+	columnCaption.Width(GridLength{ 1, GridUnitType::Star });
+	ColumnDefinition columnValue;
+	columnValue.Width(GridLength{ 1, GridUnitType::Auto });
+	volumeHeader.ColumnDefinitions().Append(columnCaption);
+	volumeHeader.ColumnDefinitions().Append(columnValue);
+
+	TextBlock volumeCaption;
+	volumeCaption.Text(_(L"Phone volume"));
+	volumeCaption.Foreground(textBrush);
+	volumeCaption.VerticalAlignment(VerticalAlignment::Center);
+
+	TextBlock volumeValue;
+	volumeValue.Foreground(subtextBrush);
+	volumeValue.VerticalAlignment(VerticalAlignment::Center);
+
+	Grid::SetColumn(volumeValue, 1);
+	volumeHeader.Children().Append(volumeCaption);
+	volumeHeader.Children().Append(volumeValue);
 
 	Slider slider;
 	slider.Minimum(0);
 	slider.Maximum(kBoostSliderMax);
 	slider.Value(BoostDbToSlider(g_volumeBoostDb));
-	slider.Width(260);
-	slider.ValueChanged([](const auto&, const auto& args) {
+	slider.Margin({ 10, 4, 10, 0 });
+	slider.ValueChanged([volumeValue](const auto&, const auto& args) {
 		g_volumeBoostDb = BoostSliderToDb(static_cast<float>(args.NewValue()));
 		if (std::fabs(g_volumeBoostDb) < 0.05f)
 		{
@@ -291,75 +397,54 @@ void SetupVolumeBoostFlyout()
 			g_volumeBoostMgr.SetGain(g_volumeBoostDb);
 		else
 			g_volumeBoostMgr.Start(g_volumeBoostDb, g_lastConnectedDeviceName);
-		UpdateBoostLabel();
+
+		wchar_t buf[32] = {};
+		swprintf(buf, 32, L"%+.1f dB", static_cast<double>(g_volumeBoostDb));
+		volumeValue.Text(buf);
 	});
 
 	Button resetButton;
 	resetButton.Content(winrt::box_value(_(L"Reset to 0 dB")));
-	resetButton.HorizontalAlignment(HorizontalAlignment::Right);
-	resetButton.Click([](const auto&, const auto&) {
-		g_volumeBoostSlider.Value(BoostDbToSlider(0.0f));
+	resetButton.Background(nullptr);
+	resetButton.BorderThickness({ 0, 0, 0, 0 });
+	resetButton.HorizontalAlignment(HorizontalAlignment::Left);
+	resetButton.Padding({ 10, 4, 10, 4 });
+	resetButton.Margin({ 10, 0, 10, 0 });
+	resetButton.CornerRadius({ 4, 4, 4, 4 });
+	resetButton.Click([slider, volumeValue](const auto&, const auto&) {
+		slider.Value(BoostDbToSlider(0.0f));
 		g_volumeBoostDb = 0.0f;
 		g_volumeBoostMgr.Stop();
-		UpdateBoostLabel();
+		volumeValue.Text(L"+0.0 dB");
+	});
+	resetButton.PointerEntered([hoverBrush](const auto& sender, const auto&) {
+		sender.as<Button>().Background(hoverBrush);
+	});
+	resetButton.PointerExited([](const auto& sender, const auto&) {
+		sender.as<Button>().Background(nullptr);
 	});
 
-	StackPanel stackPanel;
-	stackPanel.Children().Append(label);
-	stackPanel.Children().Append(slider);
-	stackPanel.Children().Append(resetButton);
-
-	Flyout flyout;
-	flyout.ShouldConstrainToRootBounds(false);
-	flyout.Content(stackPanel);
-	flyout.Closed([](const auto&, const auto&) {
-		SaveSettings();
+	auto connectButton = MakeMenuRow(_(L"Connect device"), L"\xE720", hoverBrush, [](const auto&, const auto&) {
+		if (g_xamlMenu)
+			g_xamlMenu.Hide();
+		ShowDevicePicker();
 	});
 
-	g_volumeBoostLabel = label;
-	g_volumeBoostSlider = slider;
-	g_volumeBoostFlyout = flyout;
-	UpdateBoostLabel();
-}
-
-void SetupMenu()
-{
-	// https://docs.microsoft.com/en-us/windows/uwp/design/style/segoe-ui-symbol-font
-	FontIcon boostIcon;
-	boostIcon.Glyph(L"\xE767");
-	MenuFlyoutItem boostItem;
-	boostItem.Text(_(L"Volume boost"));
-	boostItem.Icon(boostIcon);
-	boostItem.Click([](const auto&, const auto&) {
-		POINT pt;
-		GetCursorPos(&pt);
-		auto dpi = GetDpiForWindow(g_hWnd);
-		Point point = {
-			static_cast<float>(pt.x * USER_DEFAULT_SCREEN_DPI / dpi),
-			static_cast<float>(pt.y * USER_DEFAULT_SCREEN_DPI / dpi)
-		};
-		winrt::Windows::UI::Xaml::Controls::Primitives::FlyoutShowOptions options;
-		options.Position(point);
-		g_volumeBoostFlyout.ShowAt(g_xamlCanvas, options);
-	});
-
-	FontIcon settingsIcon;
-	settingsIcon.Glyph(L"\xE713");
-
-	MenuFlyoutItem settingsItem;
-	settingsItem.Text(_(L"Bluetooth Settings"));
-	settingsItem.Icon(settingsIcon);
-	settingsItem.Click([](const auto&, const auto&) {
+	auto settingsButton = MakeMenuRow(_(L"Bluetooth settings"), L"\xE713", hoverBrush, [](const auto&, const auto&) {
+		if (g_xamlMenu)
+			g_xamlMenu.Hide();
 		winrt::Windows::System::Launcher::LaunchUriAsync(Uri(L"ms-settings:bluetooth"));
 	});
 
-	FontIcon closeIcon;
-	closeIcon.Glyph(L"\xE8BB");
+	ToggleSwitch reconnectToggle;
+	reconnectToggle.Header(winrt::box_value(_(L"Reconnect on start")));
+	reconnectToggle.IsOn(g_reconnect);
+	reconnectToggle.Margin({ 4, 4, 4, 4 });
+	reconnectToggle.Toggled([](const auto& sender, const auto&) {
+		g_reconnect = sender.as<ToggleSwitch>().IsOn();
+	});
 
-	MenuFlyoutItem exitItem;
-	exitItem.Text(_(L"Exit"));
-	exitItem.Icon(closeIcon);
-	exitItem.Click([](const auto&, const auto&) {
+	auto exitButton = MakeMenuRow(_(L"Exit"), L"\xE8BB", hoverBrush, [](const auto&, const auto&) {
 		if (g_audioPlaybackConnections.size() == 0)
 		{
 			PostMessageW(g_hWnd, WM_CLOSE, 0, 0);
@@ -383,24 +468,51 @@ void SetupMenu()
 		g_xamlFlyout.ShowAt(g_xamlCanvas);
 	});
 
-	MenuFlyout menu;
-	menu.Items().Append(boostItem);
-	menu.Items().Append(settingsItem);
-	menu.Items().Append(exitItem);
-	menu.Opened([](const auto& sender, const auto&) {
-		auto menuItems = sender.as<MenuFlyout>().Items();
-		auto itemsCount = menuItems.Size();
-		if (itemsCount > 0)
-		{
-			menuItems.GetAt(itemsCount - 1).Focus(g_menuFocusState);
-		}
-		g_menuFocusState = FocusState::Unfocused;
-	});
-	menu.Closed([](const auto&, const auto&) {
+	auto makeSeparator = [borderBrush]() {
+		Border separator;
+		separator.Height(1);
+		separator.Background(borderBrush);
+		separator.Margin({ 10, 6, 10, 6 });
+		return separator;
+	};
+
+	StackPanel panel;
+	panel.Spacing(2);
+	panel.Children().Append(title);
+	panel.Children().Append(makeSeparator());
+	panel.Children().Append(connectButton);
+	panel.Children().Append(settingsButton);
+	panel.Children().Append(makeSeparator());
+	panel.Children().Append(volumeHeader);
+	panel.Children().Append(slider);
+	panel.Children().Append(resetButton);
+	panel.Children().Append(makeSeparator());
+	panel.Children().Append(reconnectToggle);
+	panel.Children().Append(makeSeparator());
+	panel.Children().Append(exitButton);
+
+	Border border;
+	border.CornerRadius({ 8, 8, 8, 8 });
+	border.Background(bgBrush);
+	border.BorderBrush(borderBrush);
+	border.BorderThickness({ 1, 1, 1, 1 });
+	border.Padding({ 6, 4, 6, 6 });
+	border.Width(270);
+	border.Child(panel);
+
+	Flyout flyout;
+	flyout.ShouldConstrainToRootBounds(false);
+	flyout.Content(border);
+	flyout.Closed([](const auto&, const auto&) {
+		SaveSettings();
 		ShowWindow(g_hWnd, SW_HIDE);
 	});
 
-	g_xamlMenu = menu;
+	g_xamlMenu = flyout;
+
+	wchar_t buf[32] = {};
+	swprintf(buf, 32, L"%+.1f dB", static_cast<double>(g_volumeBoostDb));
+	volumeValue.Text(buf);
 }
 
 winrt::fire_and_forget ConnectDevice(DevicePicker picker, DeviceInformation device)
@@ -412,6 +524,21 @@ winrt::fire_and_forget ConnectDevice(DevicePicker picker, DeviceInformation devi
 
 	try
 	{
+		// If this device is already connected (e.g. the app auto-reconnected
+		// on startup and the user then picks it manually), close the stale
+		// connection first. Two simultaneous connections to the same device
+		// can leave the first one silent.
+		auto existing = g_audioPlaybackConnections.find(std::wstring(device.Id()));
+		if (existing != g_audioPlaybackConnections.end())
+		{
+			existing->second.second.Close();
+			// Closing may fire StateChanged(Closed) synchronously, which
+			// already erases the entry; re-find before erasing.
+			existing = g_audioPlaybackConnections.find(std::wstring(device.Id()));
+			if (existing != g_audioPlaybackConnections.end())
+				g_audioPlaybackConnections.erase(existing);
+		}
+
 		auto connection = AudioPlaybackConnection::TryCreateFromId(device.Id());
 		if (connection)
 		{
@@ -489,8 +616,9 @@ winrt::fire_and_forget ConnectDevice(DevicePicker picker, DeviceInformation devi
 	}
 	else
 	{
-		auto it = g_audioPlaybackConnections.find(std::wstring(device.Id()));
-		if (it != g_audioPlaybackConnections.end())
+		// Closing the connection may fire StateChanged(Closed) synchronously,
+		// which already erases the entry, so re-find before erasing.
+		if (auto it = g_audioPlaybackConnections.find(std::wstring(device.Id())); it != g_audioPlaybackConnections.end())
 		{
 			it->second.second.Close();
 			g_audioPlaybackConnections.erase(it);
@@ -521,13 +649,21 @@ void SetupDevicePicker()
 	});
 	g_devicePicker.DisconnectButtonClicked([](const auto& sender, const auto& args) {
 		auto device = args.Device();
-		auto it = g_audioPlaybackConnections.find(std::wstring(device.Id()));
-		if (it != g_audioPlaybackConnections.end())
+		if (auto it = g_audioPlaybackConnections.find(std::wstring(device.Id())); it != g_audioPlaybackConnections.end())
 		{
 			it->second.second.Close();
-			g_audioPlaybackConnections.erase(it);
+			// Closing may fire StateChanged(Closed) synchronously, which
+			// already erases the entry; re-find before erasing.
+			it = g_audioPlaybackConnections.find(std::wstring(device.Id()));
+			if (it != g_audioPlaybackConnections.end())
+				g_audioPlaybackConnections.erase(it);
+			if (g_audioPlaybackConnections.empty())
+				g_volumeBoostMgr.Stop();
 		}
 		sender.SetDisplayStatus(device, {}, DevicePickerDisplayStatusOptions::None);
+		// Dismiss the picker and hide the helper window so the app cannot
+		// stay stuck in the foreground after disconnecting.
+		SetWindowPos(g_hWnd, nullptr, 0, 0, 0, 0, SWP_NOZORDER | SWP_HIDEWINDOW);
 	});
 }
 
