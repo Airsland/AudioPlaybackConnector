@@ -20,6 +20,8 @@
 #include <winrt/Windows.Media.MediaProperties.h>
 #include <winrt/Windows.Media.Render.h>
 
+#include <wil/win32_helpers.h>
+
 void NotifyVolumeBoostStatus(const wchar_t* title, const wchar_t* message);
 
 // Simple diagnostic logger. Writes to AudioPlaybackConnector.log next to the
@@ -124,6 +126,7 @@ public:
 private:
 	winrt::fire_and_forget StartAsync();
 	winrt::Windows::Foundation::IAsyncOperation<bool> TryStartAsync();
+	void BoostOriginalSessionVolume();
 	void MuteOriginalSessions();
 	void UnmuteOriginalSessions();
 
@@ -224,6 +227,56 @@ static std::wstring FindCaptureEndpointByName(std::wstring_view deviceName)
 	return fallback;
 }
 
+// The A2DP Sink recording endpoint is hidden from the audio endpoint
+// enumeration APIs on Windows 11, but it still exists in the MMDevices
+// registry. Reconstruct its device id from the registry GUID so we can try
+// to address it directly.
+static std::wstring FindCaptureEndpointByRegistry()
+{
+	std::wstring result;
+
+	try
+	{
+		HKEY hRoot = nullptr;
+		if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Capture", 0, KEY_READ, &hRoot) != ERROR_SUCCESS)
+			return {};
+		wil::unique_hkey rootKey(hRoot);
+
+		for (DWORD i = 0; ; ++i)
+		{
+			wchar_t subKeyName[256] = {};
+			DWORD nameSize = 256;
+			if (RegEnumKeyExW(rootKey.get(), i, subKeyName, &nameSize, nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS)
+				break;
+
+			std::wstring propsPath = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Capture\\";
+			propsPath += subKeyName;
+			propsPath += L"\\Properties";
+
+			HKEY hProps = nullptr;
+			if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, propsPath.c_str(), 0, KEY_READ, &hProps) != ERROR_SUCCESS)
+				continue;
+			wil::unique_hkey propsKey(hProps);
+
+			wchar_t name[1024] = {};
+			DWORD dataSize = static_cast<DWORD>(sizeof(name));
+			DWORD type = 0;
+			if (RegQueryValueExW(propsKey.get(), L"{b3f8fa53-0004-438e-9003-51a46e139bfc},6", nullptr, &type, reinterpret_cast<BYTE*>(name), &dataSize) == ERROR_SUCCESS && type == REG_SZ)
+			{
+				if (ContainsIgnoreCase(name, L"A2DP"))
+				{
+					AppendVolumeBoostLog((L"VolumeBoost: found endpoint by registry: " + std::wstring(name)).c_str());
+					result = L"\\\\?\\SWD#MMDEVAPI#{0.0.1.00000000}.{" + std::wstring(subKeyName) + L"}#{e6327cad-dcec-4949-ae8a-917e7da92974}";
+					break;
+				}
+			}
+		}
+	}
+	CATCH_LOG();
+
+	return result;
+}
+
 static winrt::Windows::Devices::Enumeration::DeviceInformation FindCaptureInputDevice(std::wstring_view deviceName)
 {
 	winrt::Windows::Devices::Enumeration::DeviceInformation fallback{ nullptr };
@@ -258,11 +311,12 @@ static winrt::Windows::Devices::Enumeration::DeviceInformation FindCaptureInputD
 	}
 	CATCH_LOG();
 
-	// Fallback: the endpoint may be hidden from the WinRT device list
-	// (Windows 11 hides it from the Sound settings UI), so search active
-	// capture endpoints through the low-level Core Audio API and resolve the
-	// id back to a DeviceInformation object.
-	std::wstring id = FindCaptureEndpointByName(deviceName);
+	// Fallback: the endpoint may be hidden from the WinRT device list and
+	// even from Core Audio enumeration (Windows 11), so reconstruct its id
+	// from the registry and resolve it back to a DeviceInformation object.
+	std::wstring id = FindCaptureEndpointByRegistry();
+	if (id.empty())
+		id = FindCaptureEndpointByName(deviceName);
 	if (!id.empty())
 	{
 		try
@@ -318,6 +372,12 @@ winrt::Windows::Foundation::IAsyncOperation<bool> VolumeBoost::TryStartAsync()
 {
 	try
 	{
+		// First, raise the volume of the audio session that carries the A2DP
+		// stream (our process or a session named after the device). If the
+		// system renders the stream at a low session volume, this alone fixes
+		// the quietness without any capture/re-render.
+		BoostOriginalSessionVolume();
+
 		auto inputDevice = FindCaptureInputDevice(m_deviceName);
 		if (!inputDevice)
 		{
@@ -400,6 +460,71 @@ winrt::Windows::Foundation::IAsyncOperation<bool> VolumeBoost::TryStartAsync()
 		AppendVolumeBoostLog(L"VolumeBoost: TryStartAsync threw");
 		co_return false;
 	}
+}
+
+void VolumeBoost::BoostOriginalSessionVolume()
+{
+	try
+	{
+		winrt::com_ptr<IMMDeviceEnumerator> enumerator;
+		winrt::check_hresult(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(enumerator.put())));
+
+		winrt::com_ptr<IMMDevice> device;
+		winrt::check_hresult(enumerator->GetDefaultAudioEndpoint(eRender, eConsole, device.put()));
+
+		winrt::com_ptr<IAudioSessionManager2> sessionManager;
+		winrt::check_hresult(device->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL, nullptr, sessionManager.put_void()));
+
+		winrt::com_ptr<IAudioSessionEnumerator> sessionEnumerator;
+		winrt::check_hresult(sessionManager->GetSessionEnumerator(sessionEnumerator.put()));
+
+		int count = 0;
+		winrt::check_hresult(sessionEnumerator->GetCount(&count));
+
+		const DWORD ourPid = GetCurrentProcessId();
+		for (int i = 0; i < count; ++i)
+		{
+			winrt::com_ptr<IAudioSessionControl> control;
+			if (FAILED(sessionEnumerator->GetSession(i, control.put())))
+				continue;
+
+			std::wstring displayName;
+			LPWSTR name = nullptr;
+			if (SUCCEEDED(control->GetDisplayName(&name)) && name)
+			{
+				displayName = name;
+				CoTaskMemFree(name);
+			}
+
+			DWORD pid = 0;
+			auto control2 = control.try_as<IAudioSessionControl2>();
+			if (control2)
+				control2->GetProcessId(&pid);
+
+			auto volume = control.try_as<ISimpleAudioVolume>();
+			if (!volume)
+				continue;
+
+			float level = 0.0f;
+			BOOL isMuted = FALSE;
+			volume->GetMasterVolume(&level);
+			volume->GetMute(&isMuted);
+			AppendVolumeBoostLog((L"VolumeBoost: session pid=" + std::to_wstring(pid) +
+				L" vol=" + std::to_wstring(static_cast<double>(level)) +
+				L" muted=" + std::to_wstring(isMuted) +
+				L" name=" + displayName).c_str());
+
+			const bool isOurProcess = (pid == ourPid);
+			const bool isDeviceStream = ContainsIgnoreCase(displayName, m_deviceName) || ContainsIgnoreCase(displayName, L"A2DP");
+			if ((isOurProcess || isDeviceStream) && level < 1.0f)
+			{
+				volume->SetMasterVolume(1.0f, nullptr);
+				AppendVolumeBoostLog((L"VolumeBoost: raised session volume to 1.0 (was " +
+					std::to_wstring(static_cast<double>(level)) + L")").c_str());
+			}
+		}
+	}
+	CATCH_LOG();
 }
 
 void VolumeBoost::MuteOriginalSessions()
