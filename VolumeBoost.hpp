@@ -266,7 +266,17 @@ static std::wstring FindCaptureEndpointByRegistry()
 				if (ContainsIgnoreCase(name, L"A2DP"))
 				{
 					AppendVolumeBoostLog((L"VolumeBoost: found endpoint by registry: " + std::wstring(name)).c_str());
-					result = L"\\\\?\\SWD#MMDEVAPI#{0.0.1.00000000}.{" + std::wstring(subKeyName) + L"}#{e6327cad-dcec-4949-ae8a-917e7da92974}";
+
+					// The canonical device id is stored in the
+					// {9c119480-ddc2-4954-a150-5bd240d454ad},9 property.
+					wchar_t deviceId[2048] = {};
+					DWORD idSize = static_cast<DWORD>(sizeof(deviceId));
+					DWORD idType = 0;
+					if (RegQueryValueExW(propsKey.get(), L"{9c119480-ddc2-4954-a150-5bd240d454ad},9", nullptr, &idType, reinterpret_cast<BYTE*>(deviceId), &idSize) == ERROR_SUCCESS && idType == REG_SZ)
+					{
+						AppendVolumeBoostLog((L"VolumeBoost: registry device id: " + std::wstring(deviceId)).c_str());
+						result = deviceId;
+					}
 					break;
 				}
 			}
