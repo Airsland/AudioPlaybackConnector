@@ -280,8 +280,5 @@ void VolumeBoost::RestoreOriginalLevel()
 		AppendVolumeBoostLog(L"VolumeBoost: restored original level");
 		m_haveOriginalLevel = false;
 	}
-	catch (...)
-	{
-		CATCH_LOG();
-	}
+	CATCH_LOG();
 }
