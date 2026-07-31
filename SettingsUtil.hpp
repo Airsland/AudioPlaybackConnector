@@ -2,11 +2,13 @@
 
 constexpr auto CONFIG_NAME = L"AudioPlaybackConnector.json";
 constexpr auto BUFFER_SIZE = 4096;
+constexpr auto CONFIG_VOLUME_BOOST = L"volumeBoost";
 
 void DefaultSettings()
 {
 	g_reconnect = false;
 	g_lastDevices.clear();
+	g_volumeBoost = 1.0f;
 }
 
 void LoadSettings()
@@ -34,6 +36,10 @@ void LoadSettings()
 		auto jsonObj = JsonObject::Parse(utf16);
 		g_reconnect = jsonObj.Lookup(L"reconnect").GetBoolean();
 
+		auto volumeBoost = jsonObj.TryLookup(CONFIG_VOLUME_BOOST);
+		if (volumeBoost)
+			g_volumeBoost = static_cast<float>(volumeBoost.GetNumber());
+
 		auto lastDevices = jsonObj.Lookup(L"lastDevices").GetArray();
 		g_lastDevices.reserve(lastDevices.Size());
 		for (const auto& i : lastDevices)
@@ -51,6 +57,7 @@ void SaveSettings()
 	{
 		JsonObject jsonObj;
 		jsonObj.Insert(L"reconnect", JsonValue::CreateBooleanValue(g_reconnect));
+		jsonObj.Insert(CONFIG_VOLUME_BOOST, JsonValue::CreateNumberValue(g_volumeBoost));
 
 		JsonArray lastDevices;
 		for (const auto& i : g_audioPlaybackConnections)

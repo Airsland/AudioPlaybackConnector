@@ -101,6 +101,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 	switch (message)
 	{
 	case WM_DESTROY:
+		g_volumeBoostMgr.Stop();
 		for (const auto& connection : g_audioPlaybackConnections)
 		{
 			connection.second.second.Close();
@@ -230,6 +231,43 @@ void SetupFlyout()
 void SetupMenu()
 {
 	// https://docs.microsoft.com/en-us/windows/uwp/design/style/segoe-ui-symbol-font
+	MenuFlyoutSubItem boostItem;
+	boostItem.Text(_(L"Volume boost"));
+
+	FontIcon boostIcon;
+	boostIcon.Glyph(L"\xE767");
+	boostItem.Icon(boostIcon);
+
+	const std::pair<float, const wchar_t*> boostOptions[] = {
+		{ 1.0f, L"Off" },
+		{ 1.5f, L"1.5x" },
+		{ 2.0f, L"2x" },
+		{ 3.0f, L"3x" },
+	};
+	for (const auto& option : boostOptions)
+	{
+		ToggleMenuFlyoutItem item;
+		item.Text(_(option.second));
+		item.GroupName(L"volumeBoost");
+		item.IsChecked(g_volumeBoost == option.first);
+		item.Click([gain = option.first](const auto&, const auto&) {
+			g_volumeBoost = gain;
+			SaveSettings();
+			if (gain > 1.0f)
+			{
+				if (g_volumeBoostMgr.IsActive())
+					g_volumeBoostMgr.SetGain(gain);
+				else if (!g_lastConnectedDeviceName.empty())
+					g_volumeBoostMgr.Start(g_lastConnectedDeviceName);
+			}
+			else
+			{
+				g_volumeBoostMgr.Stop();
+			}
+		});
+		boostItem.Items().Append(item);
+	}
+
 	FontIcon settingsIcon;
 	settingsIcon.Glyph(L"\xE713");
 
@@ -271,6 +309,7 @@ void SetupMenu()
 	});
 
 	MenuFlyout menu;
+	menu.Items().Append(boostItem);
 	menu.Items().Append(settingsItem);
 	menu.Items().Append(exitItem);
 	menu.Opened([](const auto& sender, const auto&) {
@@ -311,6 +350,8 @@ winrt::fire_and_forget ConnectDevice(DevicePicker picker, DeviceInformation devi
 					{
 						g_devicePicker.SetDisplayStatus(it->second.first, {}, DevicePickerDisplayStatusOptions::None);
 						g_audioPlaybackConnections.erase(it);
+						if (g_audioPlaybackConnections.empty())
+							g_volumeBoostMgr.Stop();
 					}
 					sender.Close();
 				}
@@ -366,7 +407,10 @@ winrt::fire_and_forget ConnectDevice(DevicePicker picker, DeviceInformation devi
 
 	if (success)
 	{
+		g_lastConnectedDeviceName = std::wstring(device.Name());
 		picker.SetDisplayStatus(device, _(L"Connected"), DevicePickerDisplayStatusOptions::ShowDisconnectButton);
+		if (g_volumeBoost > 1.0f)
+			g_volumeBoostMgr.Start(device.Name());
 	}
 	else
 	{
@@ -375,6 +419,8 @@ winrt::fire_and_forget ConnectDevice(DevicePicker picker, DeviceInformation devi
 		{
 			it->second.second.Close();
 			g_audioPlaybackConnections.erase(it);
+			if (g_audioPlaybackConnections.empty())
+				g_volumeBoostMgr.Stop();
 		}
 		picker.SetDisplayStatus(device, errorMessage, DevicePickerDisplayStatusOptions::ShowRetryButton);
 	}

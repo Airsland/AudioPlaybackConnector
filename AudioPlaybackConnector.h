@@ -42,3 +42,8 @@ std::vector<std::wstring> g_lastDevices;
 #include "I18n.hpp"
 #include "SettingsUtil.hpp"
 #include "Direct2DSvg.hpp"
+#include "VolumeBoost.hpp"
+
+float g_volumeBoost = 1.0f;
+std::wstring g_lastConnectedDeviceName;
+VolumeBoost g_volumeBoostMgr;
