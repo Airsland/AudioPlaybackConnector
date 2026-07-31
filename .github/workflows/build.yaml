@@ -8,17 +8,17 @@ jobs:
   build:
     runs-on: windows-latest
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
       with:
         submodules: true
     - name: Add msbuild to PATH
-      uses: microsoft/setup-msbuild@v1.0.0
-    - uses: nuget/setup-nuget@v1
+      uses: microsoft/setup-msbuild@v2
+    - uses: nuget/setup-nuget@v2
       with:
         nuget-version: latest
-    - uses: actions/setup-python@v1
+    - uses: actions/setup-python@v5
       with:
-        python-version: 3.7
+        python-version: 3.9
     - run: |
         cd translate
         pip install -r requirements.txt
@@ -36,81 +36,55 @@ jobs:
           msbuild AudioPlaybackConnector.sln "-p:Configuration=Release;Platform=ARM" }
         Get-Job | Wait-Job | Receive-Job
       shell: powershell
-    - uses: actions/upload-artifact@v2
+    - uses: actions/upload-artifact@v4
       with:
         name: AudioPlaybackConnector64
         path: x64/Release/AudioPlaybackConnector64.exe
-    - uses: actions/upload-artifact@v2
+    - uses: actions/upload-artifact@v4
       with:
         name: AudioPlaybackConnector64
         path: x64/Release/AudioPlaybackConnector64.pdb
-    - uses: actions/upload-artifact@v2
+    - uses: actions/upload-artifact@v4
       with:
         name: AudioPlaybackConnector32
         path: Release/AudioPlaybackConnector32.exe
-    - uses: actions/upload-artifact@v2
+    - uses: actions/upload-artifact@v4
       with:
         name: AudioPlaybackConnector32
         path: Release/AudioPlaybackConnector32.pdb
-    - uses: actions/upload-artifact@v2
+    - uses: actions/upload-artifact@v4
       with:
         name: AudioPlaybackConnectorARM64
         path: ARM64/Release/AudioPlaybackConnectorARM64.exe
-    - uses: actions/upload-artifact@v2
+    - uses: actions/upload-artifact@v4
       with:
         name: AudioPlaybackConnectorARM64
         path: ARM64/Release/AudioPlaybackConnectorARM64.pdb
-    - uses: actions/upload-artifact@v2
+    - uses: actions/upload-artifact@v4
       with:
         name: AudioPlaybackConnectorARM
         path: ARM/Release/AudioPlaybackConnectorARM.exe
-    - uses: actions/upload-artifact@v2
+    - uses: actions/upload-artifact@v4
       with:
         name: AudioPlaybackConnectorARM
         path: ARM/Release/AudioPlaybackConnectorARM.pdb
     - name: Create Release
-      id: create_release
-      uses: actions/create-release@v1
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag_name: ${{ github.ref }}
-        release_name: ${{ github.ref }}
-        draft: true
-        prerelease: false
-    - name: Upload Release Asset
-      uses: actions/upload-release-asset@v1
+        GH_TOKEN: ${{ github.token }}
+      run: gh release create "${{ github.ref_name }}" --draft --title "${{ github.ref_name }}" --repo "${{ github.repository }}" || true
+    - name: Upload Release Asset (x64)
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ steps.create_release.outputs.upload_url }}
-        asset_path: x64/Release/AudioPlaybackConnector64.exe
-        asset_name: AudioPlaybackConnector64.exe
-        asset_content_type: application/octet-stream
-    - name: Upload Release Asset
-      uses: actions/upload-release-asset@v1
+        GH_TOKEN: ${{ github.token }}
+      run: gh release upload "${{ github.ref_name }}" x64/Release/AudioPlaybackConnector64.exe x64/Release/AudioPlaybackConnector64.pdb --clobber --repo "${{ github.repository }}"
+    - name: Upload Release Asset (x86)
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ steps.create_release.outputs.upload_url }}
-        asset_path: Release/AudioPlaybackConnector32.exe
-        asset_name: AudioPlaybackConnector32.exe
-        asset_content_type: application/octet-stream
-    - name: Upload Release Asset
-      uses: actions/upload-release-asset@v1
+        GH_TOKEN: ${{ github.token }}
+      run: gh release upload "${{ github.ref_name }}" Release/AudioPlaybackConnector32.exe Release/AudioPlaybackConnector32.pdb --clobber --repo "${{ github.repository }}"
+    - name: Upload Release Asset (ARM64)
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ steps.create_release.outputs.upload_url }}
-        asset_path: ARM64/Release/AudioPlaybackConnectorARM64.exe
-        asset_name: AudioPlaybackConnectorARM64.exe
-        asset_content_type: application/octet-stream
-    - name: Upload Release Asset
-      uses: actions/upload-release-asset@v1
+        GH_TOKEN: ${{ github.token }}
+      run: gh release upload "${{ github.ref_name }}" ARM64/Release/AudioPlaybackConnectorARM64.exe ARM64/Release/AudioPlaybackConnectorARM64.pdb --clobber --repo "${{ github.repository }}"
+    - name: Upload Release Asset (ARM)
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ steps.create_release.outputs.upload_url }}
-        asset_path: ARM/Release/AudioPlaybackConnectorARM.exe
-        asset_name: AudioPlaybackConnectorARM.exe
-        asset_content_type: application/octet-stream
+        GH_TOKEN: ${{ github.token }}
+      run: gh release upload "${{ github.ref_name }}" ARM/Release/AudioPlaybackConnectorARM.exe ARM/Release/AudioPlaybackConnectorARM.pdb --clobber --repo "${{ github.repository }}"
