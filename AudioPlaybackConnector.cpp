@@ -244,13 +244,19 @@ void SetupMenu()
 		{ 2.0f, L"2x" },
 		{ 3.0f, L"3x" },
 	};
+	auto boostSubItem = boostItem;
 	for (const auto& option : boostOptions)
 	{
-		RadioMenuFlyoutItem item;
+		ToggleMenuFlyoutItem item;
 		item.Text(_(option.second));
-		item.GroupName(L"volumeBoost");
 		item.IsChecked(g_volumeBoost == option.first);
-		item.Click([gain = option.first](const auto&, const auto&) {
+		item.Click([boostSubItem, gain = option.first](const auto& sender, const auto&) {
+			auto clicked = sender.as<ToggleMenuFlyoutItem>();
+			for (auto const& i : boostSubItem.Items())
+			{
+				if (auto toggle = i.try_as<ToggleMenuFlyoutItem>())
+					toggle.IsChecked(toggle == clicked);
+			}
 			g_volumeBoost = gain;
 			SaveSettings();
 			if (gain > 1.0f)
