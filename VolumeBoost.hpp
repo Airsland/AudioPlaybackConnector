@@ -56,10 +56,7 @@ public:
 			{
 				m_outputNode.OutgoingGain(m_gain);
 			}
-			catch (...)
-			{
-				CATCH_LOG();
-			}
+			CATCH_LOG();
 		}
 	}
 
@@ -74,10 +71,7 @@ public:
 			if (m_graph)
 				m_graph.Stop();
 		}
-		catch (...)
-		{
-			CATCH_LOG();
-		}
+		CATCH_LOG();
 
 		m_inputNode = nullptr;
 		m_outputNode = nullptr;
@@ -171,15 +165,12 @@ static std::wstring FindCaptureEndpointByName(std::wstring_view deviceName)
 				continue;
 
 			if (ContainsIgnoreCase(name, deviceName))
-				return GetDeviceId(device);
+				return GetDeviceId(device.get());
 			if (fallback.empty())
-				fallback = GetDeviceId(device);
+				fallback = GetDeviceId(device.get());
 		}
 	}
-	catch (...)
-	{
-		CATCH_LOG();
-	}
+	CATCH_LOG();
 
 	return fallback;
 }
@@ -208,10 +199,7 @@ static std::wstring FindCaptureEndpoint(std::wstring_view deviceName)
 		if (!fallback.empty())
 			return fallback;
 	}
-	catch (...)
-	{
-		CATCH_LOG();
-	}
+	CATCH_LOG();
 
 	return FindCaptureEndpointByName(deviceName);
 }
@@ -242,7 +230,7 @@ winrt::fire_and_forget VolumeBoost::StartAsync()
 			return;
 		if (createResult.Status() != winrt::Windows::Media::Audio::AudioGraphCreationStatus::Success)
 		{
-			LOG_HR(createResult.ExtendedError());
+			OutputDebugStringW(L"VolumeBoost: AudioGraph creation failed.\n");
 			Stop();
 			return;
 		}
@@ -254,7 +242,7 @@ winrt::fire_and_forget VolumeBoost::StartAsync()
 			return;
 		if (inputResult.Status() != winrt::Windows::Media::Audio::AudioDeviceNodeCreationStatus::Success)
 		{
-			LOG_HR(inputResult.ExtendedError());
+			OutputDebugStringW(L"VolumeBoost: input node creation failed.\n");
 			Stop();
 			return;
 		}
@@ -265,7 +253,7 @@ winrt::fire_and_forget VolumeBoost::StartAsync()
 			return;
 		if (outputResult.Status() != winrt::Windows::Media::Audio::AudioDeviceNodeCreationStatus::Success)
 		{
-			LOG_HR(outputResult.ExtendedError());
+			OutputDebugStringW(L"VolumeBoost: output node creation failed.\n");
 			Stop();
 			return;
 		}
@@ -287,7 +275,7 @@ winrt::fire_and_forget VolumeBoost::StartAsync()
 	}
 	catch (...)
 	{
-		CATCH_LOG();
+		LOG_CAUGHT_EXCEPTION();
 		Stop();
 	}
 }
@@ -343,11 +331,8 @@ void VolumeBoost::MuteOriginalSessions()
 				m_mutedSessions.push_back(std::move(control));
 		}
 	}
-	catch (...)
-	{
-		CATCH_LOG();
-		m_mutedSessions.clear();
-	}
+	CATCH_LOG();
+	m_mutedSessions.clear();
 }
 
 void VolumeBoost::UnmuteOriginalSessions()
