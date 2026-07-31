@@ -253,6 +253,8 @@ void SetupMenu()
 		{ 1.5f, L"1.5x" },
 		{ 2.0f, L"2x" },
 		{ 3.0f, L"3x" },
+		{ 4.0f, L"4x" },
+		{ 6.0f, L"6x" },
 	};
 	auto boostSubItem = boostItem;
 	for (const auto& option : boostOptions)
@@ -274,7 +276,7 @@ void SetupMenu()
 				if (g_volumeBoostMgr.IsActive())
 					g_volumeBoostMgr.SetGain(gain);
 				else if (!g_lastConnectedDeviceName.empty())
-					g_volumeBoostMgr.Start(g_lastConnectedDeviceName);
+					g_volumeBoostMgr.Start(gain, g_lastConnectedDeviceName);
 			}
 			else
 			{
@@ -426,7 +428,7 @@ winrt::fire_and_forget ConnectDevice(DevicePicker picker, DeviceInformation devi
 		g_lastConnectedDeviceName = std::wstring(device.Name());
 		picker.SetDisplayStatus(device, _(L"Connected"), DevicePickerDisplayStatusOptions::ShowDisconnectButton);
 		if (g_volumeBoost > 1.0f)
-			g_volumeBoostMgr.Start(device.Name());
+			g_volumeBoostMgr.Start(g_volumeBoost, device.Name());
 	}
 	else
 	{

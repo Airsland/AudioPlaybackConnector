@@ -125,11 +125,12 @@ static float GainToDb(float gain)
 class VolumeBoost
 {
 public:
-	void Start(std::wstring_view)
+	void Start(float gain, std::wstring_view)
 	{
 		if (m_active || m_starting)
 			return;
 
+		m_gain = gain;
 		m_stopped = false;
 		m_starting = true;
 		StartAsync();
@@ -227,7 +228,11 @@ bool VolumeBoost::ApplyGain()
 		float increment = 0.0f;
 		volume->GetVolumeRange(&rangeMin, &rangeMax, &increment);
 
-		float target = GainToDb(m_gain);
+		// Boost is applied relative to the level the endpoint had before we
+		// took control, so the phone stream is always louder than the current
+		// "100%" state, regardless of what level Windows happens to have
+		// stored for this endpoint.
+		float target = m_originalLevel + GainToDb(m_gain);
 		if (target < rangeMin)
 			target = rangeMin;
 		if (target > rangeMax)
@@ -235,7 +240,9 @@ bool VolumeBoost::ApplyGain()
 
 		winrt::check_hresult(volume->SetMasterVolumeLevel(target, nullptr));
 		AppendVolumeBoostLog((L"VolumeBoost: set level to " + std::to_wstring(static_cast<double>(target)) +
-			L" dB (range " + std::to_wstring(static_cast<double>(rangeMin)) +
+			L" dB (original " + std::to_wstring(static_cast<double>(m_originalLevel)) +
+			L" dB + boost " + std::to_wstring(static_cast<double>(GainToDb(m_gain))) +
+			L" dB, range " + std::to_wstring(static_cast<double>(rangeMin)) +
 			L".." + std::to_wstring(static_cast<double>(rangeMax)) + L" dB)").c_str());
 		m_active = true;
 		return true;
