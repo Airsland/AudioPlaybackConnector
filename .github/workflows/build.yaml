@@ -26,10 +26,16 @@ jobs:
       shell: bash
     - run: nuget restore AudioPlaybackConnector.sln
     - run: |
-        msbuild AudioPlaybackConnector.sln "-p:Configuration=Release;Platform=x64"
-        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-        msbuild AudioPlaybackConnector.sln "-p:Configuration=Release;Platform=x86"
-        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        $out = msbuild AudioPlaybackConnector.sln "-p:Configuration=Release;Platform=x64" 2>&1
+        $code = $LASTEXITCODE
+        $out | ForEach-Object { Write-Host $_ }
+        $out | Select-String -Pattern 'error [A-Z]+[0-9]+' | ForEach-Object { Write-Host "::error::$($_.Line.Trim())" }
+        if ($code -ne 0) { exit $code }
+        $out = msbuild AudioPlaybackConnector.sln "-p:Configuration=Release;Platform=x86" 2>&1
+        $code = $LASTEXITCODE
+        $out | ForEach-Object { Write-Host $_ }
+        $out | Select-String -Pattern 'error [A-Z]+[0-9]+' | ForEach-Object { Write-Host "::error::$($_.Line.Trim())" }
+        if ($code -ne 0) { exit $code }
       shell: powershell
     - uses: actions/upload-artifact@v4
       with:
