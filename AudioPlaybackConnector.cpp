@@ -304,10 +304,10 @@ static Button MakeMenuRow(const wchar_t* text, const wchar_t* glyph, SolidColorB
 	button.Padding({ 10, 7, 10, 7 });
 	button.CornerRadius({ 4, 4, 4, 4 });
 	button.Click(handler);
-	button.PointerEntered([hoverBrush](const auto& sender, const auto&) {
+	button.PointerEntered([hoverBrush](winrt::Windows::Foundation::IInspectable const& sender, winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs const&) {
 		sender.as<Button>().Background(hoverBrush);
 	});
-	button.PointerExited([](const auto& sender, const auto&) {
+	button.PointerExited([](winrt::Windows::Foundation::IInspectable const& sender, winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs const&) {
 		sender.as<Button>().Background(nullptr);
 	});
 	return button;
@@ -417,10 +417,10 @@ void SetupMenu()
 		g_volumeBoostMgr.Stop();
 		volumeValue.Text(L"+0.0 dB");
 	});
-	resetButton.PointerEntered([hoverBrush](const auto& sender, const auto&) {
+	resetButton.PointerEntered([hoverBrush](winrt::Windows::Foundation::IInspectable const& sender, winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs const&) {
 		sender.as<Button>().Background(hoverBrush);
 	});
-	resetButton.PointerExited([](const auto& sender, const auto&) {
+	resetButton.PointerExited([](winrt::Windows::Foundation::IInspectable const& sender, winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs const&) {
 		sender.as<Button>().Background(nullptr);
 	});
 
