@@ -9,6 +9,16 @@ void SetupDevicePicker();
 void SetupSvgIcon();
 void UpdateNotifyIcon();
 
+void NotifyVolumeBoostStatus(const wchar_t* title, const wchar_t* message)
+{
+	wcscpy_s(g_nid.szInfoTitle, title);
+	wcscpy_s(g_nid.szInfo, message);
+	g_nid.dwInfoFlags = NIIF_INFO;
+	g_nid.uFlags |= NIF_INFO;
+	Shell_NotifyIconW(NIM_MODIFY, &g_nid);
+	g_nid.uFlags &= ~NIF_INFO;
+}
+
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 	_In_opt_ HINSTANCE hPrevInstance,
 	_In_ LPWSTR    lpCmdLine,

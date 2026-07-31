@@ -19,6 +19,39 @@
 #include <winrt/Windows.Media.MediaProperties.h>
 #include <winrt/Windows.Media.Render.h>
 
+void NotifyVolumeBoostStatus(const wchar_t* title, const wchar_t* message);
+
+// Simple diagnostic logger. Writes to AudioPlaybackConnector.log next to the
+// exe so failures can be reported without a debugger.
+static void AppendVolumeBoostLog(const wchar_t* line)
+{
+	try
+	{
+		wchar_t exePath[MAX_PATH] = {};
+		const DWORD n = GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+		if (n == 0 || n >= MAX_PATH)
+			return;
+
+		wchar_t* slash = wcsrchr(exePath, L'\\');
+		if (!slash)
+			return;
+		const size_t remaining = MAX_PATH - static_cast<size_t>(slash + 1 - exePath);
+		wcscpy_s(slash + 1, remaining, L"AudioPlaybackConnector.log");
+
+		wil::unique_hfile hFile(CreateFileW(exePath, FILE_APPEND_DATA, FILE_SHARE_READ, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr));
+		if (!hFile)
+			return;
+
+		std::wstring entry(line);
+		entry += L"\r\n";
+		DWORD written = 0;
+		WriteFile(hFile.get(), entry.c_str(), static_cast<DWORD>(entry.size() * sizeof(wchar_t)), &written, nullptr);
+	}
+	catch (...)
+	{
+	}
+}
+
 // Software gain stage for the Bluetooth A2DP Sink stream.
 //
 // Windows renders the incoming A2DP Sink stream to the default playback
@@ -167,10 +200,15 @@ static std::wstring FindCaptureEndpointByName(std::wstring_view deviceName)
 				continue;
 
 			if (ContainsIgnoreCase(name, deviceName))
+			{
+				AppendVolumeBoostLog((L"VolumeBoost: found endpoint by WinRT (exact): " + name).c_str());
 				return GetDeviceId(device.get());
+			}
 			if (fallback.empty())
 				fallback = GetDeviceId(device.get());
 		}
+		if (!fallback.empty())
+			AppendVolumeBoostLog(L"VolumeBoost: found endpoint by WinRT (fallback name match)");
 	}
 	CATCH_LOG();
 
@@ -193,13 +231,19 @@ static winrt::Windows::Devices::Enumeration::DeviceInformation FindCaptureInputD
 				continue;
 
 			if (ContainsIgnoreCase(name, deviceName))
+			{
+				AppendVolumeBoostLog((L"VolumeBoost: found endpoint by WinRT: " + name).c_str());
 				return device;
+			}
 			if (!fallback)
 				fallback = device;
 		}
 
 		if (fallback)
+		{
+			AppendVolumeBoostLog(L"VolumeBoost: found endpoint by WinRT (fallback name match)");
 			return fallback;
+		}
 	}
 	CATCH_LOG();
 
@@ -212,12 +256,14 @@ static winrt::Windows::Devices::Enumeration::DeviceInformation FindCaptureInputD
 	{
 		try
 		{
+			AppendVolumeBoostLog((L"VolumeBoost: found endpoint by WASAPI fallback, id: " + id).c_str());
 			return winrt::Windows::Devices::Enumeration::DeviceInformation::CreateFromIdAsync(
 				winrt::hstring(id.c_str())).get();
 		}
 		CATCH_LOG();
 	}
 
+	AppendVolumeBoostLog(L"VolumeBoost: no A2DP capture endpoint found");
 	return nullptr;
 }
 
@@ -228,7 +274,9 @@ winrt::fire_and_forget VolumeBoost::StartAsync()
 		auto inputDevice = FindCaptureInputDevice(m_deviceName);
 		if (!inputDevice)
 		{
+			AppendVolumeBoostLog(L"VolumeBoost: A2DP SNK capture endpoint not found");
 			OutputDebugStringW(L"VolumeBoost: A2DP SNK capture endpoint not found.\n");
+			NotifyVolumeBoostStatus(L"Volume boost", L"未找到 A2DP 采集端点，增益未启用");
 			Stop();
 			return;
 		}
@@ -247,22 +295,35 @@ winrt::fire_and_forget VolumeBoost::StartAsync()
 			return;
 		if (createResult.Status() != winrt::Windows::Media::Audio::AudioGraphCreationStatus::Success)
 		{
+			AppendVolumeBoostLog(L"VolumeBoost: AudioGraph creation failed");
 			OutputDebugStringW(L"VolumeBoost: AudioGraph creation failed.\n");
+			NotifyVolumeBoostStatus(L"Volume boost", L"音频图创建失败，增益未启用");
 			Stop();
 			return;
 		}
 		m_graph = createResult.Graph();
 
-		auto inputFormat = winrt::Windows::Media::MediaProperties::AudioEncodingProperties::CreatePcm(48000, 2, 16);
+		auto inputFormat = winrt::Windows::Media::MediaProperties::AudioEncodingProperties::CreatePcm(44100, 2, 16);
 		auto inputResult = co_await m_graph.CreateDeviceInputNodeAsync(
 			winrt::Windows::Media::Capture::MediaCategory::Media,
 			inputFormat,
 			inputDevice);
+		if (inputResult.Status() != winrt::Windows::Media::Audio::AudioDeviceNodeCreationStatus::Success)
+		{
+			AppendVolumeBoostLog((L"VolumeBoost: input node failed at 44100, hr=" + std::to_wstring(static_cast<int32_t>(inputResult.ExtendedError()))).c_str());
+			inputFormat = winrt::Windows::Media::MediaProperties::AudioEncodingProperties::CreatePcm(48000, 2, 16);
+			inputResult = co_await m_graph.CreateDeviceInputNodeAsync(
+				winrt::Windows::Media::Capture::MediaCategory::Media,
+				inputFormat,
+				inputDevice);
+		}
 		if (m_stopped)
 			return;
 		if (inputResult.Status() != winrt::Windows::Media::Audio::AudioDeviceNodeCreationStatus::Success)
 		{
+			AppendVolumeBoostLog((L"VolumeBoost: input node failed at 48000, hr=" + std::to_wstring(static_cast<int32_t>(inputResult.ExtendedError()))).c_str());
 			OutputDebugStringW(L"VolumeBoost: input node creation failed.\n");
+			NotifyVolumeBoostStatus(L"Volume boost", L"采集节点创建失败（可能在隐私设置中被拒绝）");
 			Stop();
 			return;
 		}
@@ -273,7 +334,9 @@ winrt::fire_and_forget VolumeBoost::StartAsync()
 			return;
 		if (outputResult.Status() != winrt::Windows::Media::Audio::AudioDeviceNodeCreationStatus::Success)
 		{
+			AppendVolumeBoostLog((L"VolumeBoost: output node failed, hr=" + std::to_wstring(static_cast<int32_t>(outputResult.ExtendedError()))).c_str());
 			OutputDebugStringW(L"VolumeBoost: output node creation failed.\n");
+			NotifyVolumeBoostStatus(L"Volume boost", L"输出节点创建失败");
 			Stop();
 			return;
 		}
@@ -286,6 +349,8 @@ winrt::fire_and_forget VolumeBoost::StartAsync()
 		m_active = true;
 		m_starting = false;
 		OutputDebugStringW(L"VolumeBoost: started.\n");
+		AppendVolumeBoostLog(L"VolumeBoost: started");
+		NotifyVolumeBoostStatus(L"Volume boost", L"增益已启用");
 	}
 	catch (winrt::hresult_error const& ex)
 	{
@@ -350,6 +415,8 @@ void VolumeBoost::MuteOriginalSessions()
 			if (volume && SUCCEEDED(volume->SetMute(TRUE, nullptr)))
 				m_mutedSessions.push_back(std::move(control));
 		}
+
+		AppendVolumeBoostLog((L"VolumeBoost: muted " + std::to_wstring(m_mutedSessions.size()) + L" session(s)").c_str());
 	}
 	CATCH_LOG();
 	m_mutedSessions.clear();
