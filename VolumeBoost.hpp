@@ -178,7 +178,7 @@ static std::wstring FindCaptureEndpointByName(std::wstring_view deviceName)
 		winrt::check_hresult(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(enumerator.put())));
 
 		winrt::com_ptr<IMMDeviceCollection> collection;
-		winrt::check_hresult(enumerator->EnumAudioEndpoints(eCapture, DEVICE_STATE_ALL, collection.put()));
+		winrt::check_hresult(enumerator->EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE | DEVICE_STATE_DISABLED | DEVICE_STATE_NOTPRESENT | DEVICE_STATE_UNPLUGGED, collection.put()));
 
 		UINT count = 0;
 		winrt::check_hresult(collection->GetCount(&count));
