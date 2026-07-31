@@ -26,11 +26,10 @@ jobs:
       shell: bash
     - run: nuget restore AudioPlaybackConnector.sln
     - run: |
-        Start-Job -Init ([ScriptBlock]::Create("Set-Location '$pwd'")) -Script {
-          msbuild AudioPlaybackConnector.sln "-p:Configuration=Release;Platform=x64" }
-        Start-Job -Init ([ScriptBlock]::Create("Set-Location '$pwd'")) -Script {
-          msbuild AudioPlaybackConnector.sln "-p:Configuration=Release;Platform=x86" }
-        Get-Job | Wait-Job | Receive-Job
+        msbuild AudioPlaybackConnector.sln "-p:Configuration=Release;Platform=x64"
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        msbuild AudioPlaybackConnector.sln "-p:Configuration=Release;Platform=x86"
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       shell: powershell
     - uses: actions/upload-artifact@v4
       with:
