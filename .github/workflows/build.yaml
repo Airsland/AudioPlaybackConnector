@@ -39,35 +39,27 @@ jobs:
     - uses: actions/upload-artifact@v4
       with:
         name: AudioPlaybackConnector64
-        path: x64/Release/AudioPlaybackConnector64.exe
-    - uses: actions/upload-artifact@v4
-      with:
-        name: AudioPlaybackConnector64
-        path: x64/Release/AudioPlaybackConnector64.pdb
-    - uses: actions/upload-artifact@v4
-      with:
-        name: AudioPlaybackConnector32
-        path: Release/AudioPlaybackConnector32.exe
+        path: |
+          x64/Release/AudioPlaybackConnector64.exe
+          x64/Release/AudioPlaybackConnector64.pdb
     - uses: actions/upload-artifact@v4
       with:
         name: AudioPlaybackConnector32
-        path: Release/AudioPlaybackConnector32.pdb
+        path: |
+          Release/AudioPlaybackConnector32.exe
+          Release/AudioPlaybackConnector32.pdb
     - uses: actions/upload-artifact@v4
       with:
         name: AudioPlaybackConnectorARM64
-        path: ARM64/Release/AudioPlaybackConnectorARM64.exe
-    - uses: actions/upload-artifact@v4
-      with:
-        name: AudioPlaybackConnectorARM64
-        path: ARM64/Release/AudioPlaybackConnectorARM64.pdb
-    - uses: actions/upload-artifact@v4
-      with:
-        name: AudioPlaybackConnectorARM
-        path: ARM/Release/AudioPlaybackConnectorARM.exe
+        path: |
+          ARM64/Release/AudioPlaybackConnectorARM64.exe
+          ARM64/Release/AudioPlaybackConnectorARM64.pdb
     - uses: actions/upload-artifact@v4
       with:
         name: AudioPlaybackConnectorARM
-        path: ARM/Release/AudioPlaybackConnectorARM.pdb
+        path: |
+          ARM/Release/AudioPlaybackConnectorARM.exe
+          ARM/Release/AudioPlaybackConnectorARM.pdb
     - name: Create Release
       env:
         GH_TOKEN: ${{ github.token }}
