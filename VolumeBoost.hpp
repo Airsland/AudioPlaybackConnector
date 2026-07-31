@@ -14,7 +14,9 @@
 #include <vector>
 
 #include <winrt/Windows.Media.Audio.h>
+#include <winrt/Windows.Media.Capture.h>
 #include <winrt/Windows.Media.Devices.h>
+#include <winrt/Windows.Media.MediaProperties.h>
 #include <winrt/Windows.Media.Render.h>
 
 // Software gain stage for the Bluetooth A2DP Sink stream.
@@ -175,9 +177,9 @@ static std::wstring FindCaptureEndpointByName(std::wstring_view deviceName)
 	return fallback;
 }
 
-static std::wstring FindCaptureEndpoint(std::wstring_view deviceName)
+static winrt::Windows::Devices::Enumeration::DeviceInformation FindCaptureInputDevice(std::wstring_view deviceName)
 {
-	std::wstring fallback;
+	winrt::Windows::Devices::Enumeration::DeviceInformation fallback{ nullptr };
 
 	try
 	{
@@ -191,25 +193,40 @@ static std::wstring FindCaptureEndpoint(std::wstring_view deviceName)
 				continue;
 
 			if (ContainsIgnoreCase(name, deviceName))
-				return std::wstring(device.Id());
-			if (fallback.empty())
-				fallback = std::wstring(device.Id());
+				return device;
+			if (!fallback)
+				fallback = device;
 		}
 
-		if (!fallback.empty())
+		if (fallback)
 			return fallback;
 	}
 	CATCH_LOG();
 
-	return FindCaptureEndpointByName(deviceName);
+	// Fallback: the endpoint may be hidden from the WinRT device list
+	// (Windows 11 hides it from the Sound settings UI), so search active
+	// capture endpoints through the low-level Core Audio API and resolve the
+	// id back to a DeviceInformation object.
+	std::wstring id = FindCaptureEndpointByName(deviceName);
+	if (!id.empty())
+	{
+		try
+		{
+			return winrt::Windows::Devices::Enumeration::DeviceInformation::CreateFromIdAsync(
+				winrt::hstring(id.c_str())).get();
+		}
+		CATCH_LOG();
+	}
+
+	return nullptr;
 }
 
 winrt::fire_and_forget VolumeBoost::StartAsync()
 {
 	try
 	{
-		auto captureId = FindCaptureEndpoint(m_deviceName);
-		if (captureId.empty())
+		auto inputDevice = FindCaptureInputDevice(m_deviceName);
+		if (!inputDevice)
 		{
 			OutputDebugStringW(L"VolumeBoost: A2DP SNK capture endpoint not found.\n");
 			Stop();
@@ -236,8 +253,11 @@ winrt::fire_and_forget VolumeBoost::StartAsync()
 		}
 		m_graph = createResult.Graph();
 
-		winrt::hstring captureIdHstr(captureId.c_str());
-		auto inputResult = co_await m_graph.CreateDeviceInputNodeAsync(captureIdHstr);
+		auto inputFormat = winrt::Windows::Media::MediaProperties::AudioEncodingProperties::CreatePcm(48000, 2, 16);
+		auto inputResult = co_await m_graph.CreateDeviceInputNodeAsync(
+			winrt::Windows::Media::Capture::MediaCategory::Media,
+			inputFormat,
+			inputDevice);
 		if (m_stopped)
 			return;
 		if (inputResult.Status() != winrt::Windows::Media::Audio::AudioDeviceNodeCreationStatus::Success)
@@ -259,7 +279,7 @@ winrt::fire_and_forget VolumeBoost::StartAsync()
 		}
 		m_outputNode = outputResult.DeviceOutputNode();
 
-		m_graph.Connect(m_inputNode, m_outputNode);
+		m_inputNode.AddOutgoingConnection(m_outputNode);
 		m_outputNode.OutgoingGain(m_gain);
 		m_graph.Start();
 

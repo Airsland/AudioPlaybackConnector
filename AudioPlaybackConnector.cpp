@@ -246,7 +246,7 @@ void SetupMenu()
 	};
 	for (const auto& option : boostOptions)
 	{
-		ToggleMenuFlyoutItem item;
+		RadioMenuFlyoutItem item;
 		item.Text(_(option.second));
 		item.GroupName(L"volumeBoost");
 		item.IsChecked(g_volumeBoost == option.first);
