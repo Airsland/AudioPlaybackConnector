@@ -19,6 +19,7 @@ jobs:
         python-version: 3.9
     - run: |
         cd translate
+        git config --global url."https://github.com/".insteadOf "git://github.com/"
         pip install -r requirements.txt
         ./gen_rc.sh
       shell: bash
