@@ -101,7 +101,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 	switch (message)
 	{
 	case WM_DESTROY:
-		g_volumeBoost.Stop();
+		VolumeBoost::Reset();
 		for (const auto& connection : g_audioPlaybackConnections)
 		{
 			connection.second.second.Close();
@@ -155,14 +155,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 			g_devicePicker.Show(rect, Placement::Above);
 		}
 		break;
-		case WM_RBUTTONUP: // Menu activated by mouse click
-			g_menuFocusState = FocusState::Pointer;
-			break;
 		case WM_CONTEXTMENU:
 		{
-			if (g_menuFocusState == FocusState::Unfocused)
-				g_menuFocusState = FocusState::Keyboard;
-
 			auto dpi = GetDpiForWindow(hWnd);
 			Point point = {
 				static_cast<float>(GET_X_LPARAM(wParam) * USER_DEFAULT_SCREEN_DPI / dpi),
@@ -173,7 +167,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 			SetWindowPos(g_hWnd, HWND_TOPMOST, 0, 0, 1, 1, SWP_SHOWWINDOW);
 			SetForegroundWindow(hWnd);
 
-			g_xamlMenu.ShowAt(g_xamlCanvas, point);
+			winrt::Windows::UI::Xaml::Controls::Primitives::FlyoutShowOptions options;
+			options.Position(point);
+			g_xamlMenu.ShowAt(g_xamlCanvas, options);
 		}
 		break;
 		}
@@ -228,63 +224,117 @@ void SetupFlyout()
 	g_xamlFlyout = flyout;
 }
 
+static bool IsLightTheme()
+{
+	DWORD value = 0, cbValue = sizeof(value);
+	RegGetValueW(HKEY_CURRENT_USER, LR"(Software\Microsoft\Windows\CurrentVersion\Themes\Personalize)", L"SystemUsesLightTheme", RRF_RT_REG_DWORD, nullptr, &value, &cbValue);
+	return value != 0;
+}
+
+static winrt::Windows::UI::Color Argb(BYTE a, BYTE r, BYTE g, BYTE b)
+{
+	winrt::Windows::UI::Color c = {};
+	c.A = a;
+	c.R = r;
+	c.G = g;
+	c.B = b;
+	return c;
+}
+
+// A plain clickable menu row (icon + label) with hover feedback.
+static Button MakeMenuRow(const wchar_t* text, const wchar_t* glyph, SolidColorBrush textBrush, SolidColorBrush hoverBrush, winrt::Windows::UI::Xaml::RoutedEventHandler handler)
+{
+	FontIcon icon;
+	icon.Glyph(glyph);
+	icon.FontSize(14);
+	icon.VerticalAlignment(VerticalAlignment::Center);
+
+	TextBlock label;
+	label.Text(_(text));
+	label.Foreground(textBrush);
+	label.Margin({ 8, 0, 0, 0 });
+	label.VerticalAlignment(VerticalAlignment::Center);
+
+	StackPanel panel;
+	panel.Orientation(Orientation::Horizontal);
+	panel.Children().Append(icon);
+	panel.Children().Append(label);
+
+	Button button;
+	button.Content(panel);
+	button.Background(nullptr);
+	button.BorderThickness({ 0, 0, 0, 0 });
+	button.HorizontalAlignment(HorizontalAlignment::Stretch);
+	button.HorizontalContentAlignment(HorizontalAlignment::Left);
+	button.Padding({ 8, 6, 8, 6 });
+	button.Click(handler);
+	button.PointerEntered([hoverBrush](winrt::Windows::Foundation::IInspectable const& sender, winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs const&) {
+		sender.as<Button>().Background(hoverBrush);
+	});
+	button.PointerExited([](winrt::Windows::Foundation::IInspectable const& sender, winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs const&) {
+		sender.as<Button>().Background(nullptr);
+	});
+	return button;
+}
+
 void SetupMenu()
 {
-	// https://docs.microsoft.com/en-us/windows/uwp/design/style/segoe-ui-symbol-font
-	FontIcon settingsIcon;
-	settingsIcon.Glyph(L"\xE713");
+	const bool light = IsLightTheme();
 
-	MenuFlyoutItem settingsItem;
-	settingsItem.Text(_(L"Bluetooth Settings"));
-	settingsItem.Icon(settingsIcon);
-	settingsItem.Click([](const auto&, const auto&) {
+	SolidColorBrush bgBrush;
+	bgBrush.Color(Argb(255, light ? 243 : 43, light ? 243 : 43, light ? 243 : 43));
+	SolidColorBrush borderBrush;
+	borderBrush.Color(Argb(255, light ? 224 : 60, light ? 224 : 60, light ? 224 : 60));
+	SolidColorBrush hoverBrush;
+	hoverBrush.Color(Argb(255, light ? 229 : 52, light ? 229 : 52, light ? 229 : 52));
+	SolidColorBrush textBrush;
+	textBrush.Color(Argb(255, light ? 27 : 243, light ? 27 : 243, light ? 27 : 243));
+	SolidColorBrush subtextBrush;
+	subtextBrush.Color(Argb(255, light ? 96 : 170, light ? 96 : 170, light ? 96 : 170));
+
+	auto settingsRow = MakeMenuRow(_(L"Bluetooth Settings"), L"\xE713", textBrush, hoverBrush, [](const auto&, const auto&) {
 		winrt::Windows::System::Launcher::LaunchUriAsync(Uri(L"ms-settings:bluetooth"));
 	});
 
-	FontIcon gainIcon;
-	gainIcon.Glyph(L"\xE767");
+	// Volume section: caption with a live level readout on the right, and a
+	// small linear 0..+30 dB slider below.
+	Grid volumeHeader;
+	volumeHeader.Margin({ 8, 6, 8, 0 });
+	ColumnDefinition colCaption;
+	colCaption.Width(GridLength{ 1, GridUnitType::Star });
+	ColumnDefinition colValue;
+	colValue.Width(GridLength{ 1, GridUnitType::Auto });
+	volumeHeader.ColumnDefinitions().Append(colCaption);
+	volumeHeader.ColumnDefinitions().Append(colValue);
 
-	MenuFlyoutSubItem gainItem;
-	gainItem.Text(_(L"Volume gain"));
-	gainItem.Icon(gainIcon);
+	TextBlock volumeCaption;
+	volumeCaption.Text(_(L"Volume gain"));
+	volumeCaption.Foreground(textBrush);
+	volumeCaption.VerticalAlignment(VerticalAlignment::Center);
 
-	const std::pair<float, const wchar_t*> gainOptions[] = {
-		{ 0.0f, L"Off" },
-		{ 3.0f, L"+3 dB" },
-		{ 6.0f, L"+6 dB" },
-		{ 9.0f, L"+9 dB" },
-		{ 12.0f, L"+12 dB" },
-	};
-	auto gainSubItem = gainItem;
-	for (const auto& option : gainOptions)
-	{
-		ToggleMenuFlyoutItem item;
-		item.Text(_(option.second));
-		item.IsChecked(g_volumeGainDb == option.first);
-		item.Click([gainSubItem, gain = option.first](const auto& sender, const auto&) {
-			auto clicked = sender.as<ToggleMenuFlyoutItem>();
-			for (auto const& i : gainSubItem.Items())
-			{
-				if (auto toggle = i.try_as<ToggleMenuFlyoutItem>())
-					toggle.IsChecked(toggle == clicked);
-			}
-			g_volumeGainDb = gain;
-			SaveSettings();
-			if (gain == 0.0f)
-				g_volumeBoost.Stop();
-			else
-				g_volumeBoost.Start(gain);
-		});
-		gainItem.Items().Append(item);
-	}
+	TextBlock volumeValue;
+	volumeValue.Foreground(subtextBrush);
+	volumeValue.VerticalAlignment(VerticalAlignment::Center);
 
-	FontIcon closeIcon;
-	closeIcon.Glyph(L"\xE8BB");
+	Grid::SetColumn(volumeValue, 1);
+	volumeHeader.Children().Append(volumeCaption);
+	volumeHeader.Children().Append(volumeValue);
 
-	MenuFlyoutItem exitItem;
-	exitItem.Text(_(L"Exit"));
-	exitItem.Icon(closeIcon);
-	exitItem.Click([](const auto&, const auto&) {
+	Slider slider;
+	slider.Minimum(0);
+	slider.Maximum(30);
+	slider.Value(g_volumeLevelDb);
+	slider.StepFrequency(0.5);
+	slider.Margin({ 8, 2, 8, 2 });
+	slider.ValueChanged([volumeValue](const auto&, const auto& args) {
+		g_volumeLevelDb = static_cast<float>(args.NewValue());
+		VolumeBoost::SetLevel(g_volumeLevelDb);
+		wchar_t buf[32] = {};
+		swprintf(buf, 32, L"%+.1f dB", static_cast<double>(g_volumeLevelDb));
+		volumeValue.Text(buf);
+	});
+
+	auto exitRow = MakeMenuRow(_(L"Exit"), L"\xE8BB", textBrush, hoverBrush, [](const auto&, const auto&) {
 		if (g_audioPlaybackConnections.size() == 0)
 		{
 			PostMessageW(g_hWnd, WM_CLOSE, 0, 0);
@@ -308,24 +358,43 @@ void SetupMenu()
 		g_xamlFlyout.ShowAt(g_xamlCanvas);
 	});
 
-	MenuFlyout menu;
-	menu.Items().Append(settingsItem);
-	menu.Items().Append(gainItem);
-	menu.Items().Append(exitItem);
-	menu.Opened([](const auto& sender, const auto&) {
-		auto menuItems = sender.as<MenuFlyout>().Items();
-		auto itemsCount = menuItems.Size();
-		if (itemsCount > 0)
-		{
-			menuItems.GetAt(itemsCount - 1).Focus(g_menuFocusState);
-		}
-		g_menuFocusState = FocusState::Unfocused;
-	});
-	menu.Closed([](const auto&, const auto&) {
+	auto makeSeparator = [borderBrush]() {
+		Border separator;
+		separator.Height(1);
+		separator.Background(borderBrush);
+		separator.Margin({ 8, 4, 8, 4 });
+		return separator;
+	};
+
+	StackPanel panel;
+	panel.Children().Append(settingsRow);
+	panel.Children().Append(makeSeparator());
+	panel.Children().Append(volumeHeader);
+	panel.Children().Append(slider);
+	panel.Children().Append(makeSeparator());
+	panel.Children().Append(exitRow);
+
+	Border border;
+	border.Background(bgBrush);
+	border.BorderBrush(borderBrush);
+	border.BorderThickness({ 1, 1, 1, 1 });
+	border.Padding({ 6, 4, 6, 4 });
+	border.Width(230);
+	border.Child(panel);
+
+	Flyout flyout;
+	flyout.ShouldConstrainToRootBounds(false);
+	flyout.Content(border);
+	flyout.Closed([](const auto&, const auto&) {
+		SaveSettings();
 		ShowWindow(g_hWnd, SW_HIDE);
 	});
 
-	g_xamlMenu = menu;
+	g_xamlMenu = flyout;
+
+	wchar_t buf[32] = {};
+	swprintf(buf, 32, L"%+.1f dB", static_cast<double>(g_volumeLevelDb));
+	volumeValue.Text(buf);
 }
 
 winrt::fire_and_forget ConnectDevice(DevicePicker picker, DeviceInformation device)
@@ -351,7 +420,7 @@ winrt::fire_and_forget ConnectDevice(DevicePicker picker, DeviceInformation devi
 						g_devicePicker.SetDisplayStatus(it->second.first, {}, DevicePickerDisplayStatusOptions::None);
 						g_audioPlaybackConnections.erase(it);
 						if (g_audioPlaybackConnections.empty())
-							g_volumeBoost.Stop();
+							VolumeBoost::Reset();
 					}
 					sender.Close();
 				}
@@ -408,8 +477,7 @@ winrt::fire_and_forget ConnectDevice(DevicePicker picker, DeviceInformation devi
 	if (success)
 	{
 		picker.SetDisplayStatus(device, _(L"Connected"), DevicePickerDisplayStatusOptions::ShowDisconnectButton);
-		if (g_volumeGainDb != 0.0f)
-			g_volumeBoost.Start(g_volumeGainDb);
+		VolumeBoost::SetLevel(g_volumeLevelDb);
 	}
 	else
 	{
@@ -419,7 +487,7 @@ winrt::fire_and_forget ConnectDevice(DevicePicker picker, DeviceInformation devi
 			it->second.second.Close();
 			g_audioPlaybackConnections.erase(it);
 			if (g_audioPlaybackConnections.empty())
-				g_volumeBoost.Stop();
+				VolumeBoost::Reset();
 		}
 		picker.SetDisplayStatus(device, errorMessage, DevicePickerDisplayStatusOptions::ShowRetryButton);
 	}
@@ -451,7 +519,7 @@ void SetupDevicePicker()
 			it->second.second.Close();
 			g_audioPlaybackConnections.erase(it);
 			if (g_audioPlaybackConnections.empty())
-				g_volumeBoost.Stop();
+				VolumeBoost::Reset();
 		}
 		sender.SetDisplayStatus(device, {}, DevicePickerDisplayStatusOptions::None);
 	});

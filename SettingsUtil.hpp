@@ -2,13 +2,13 @@
 
 constexpr auto CONFIG_NAME = L"AudioPlaybackConnector.json";
 constexpr auto BUFFER_SIZE = 4096;
-constexpr auto CONFIG_VOLUME_GAIN = L"volumeGainDb";
+constexpr auto CONFIG_VOLUME_LEVEL = L"volumeLevelDb";
 
 void DefaultSettings()
 {
 	g_reconnect = false;
 	g_lastDevices.clear();
-	g_volumeGainDb = 0.0f;
+	g_volumeLevelDb = 0.0f;
 }
 
 void LoadSettings()
@@ -36,9 +36,9 @@ void LoadSettings()
 		auto jsonObj = JsonObject::Parse(utf16);
 		g_reconnect = jsonObj.Lookup(L"reconnect").GetBoolean();
 
-		auto volumeGain = jsonObj.TryLookup(CONFIG_VOLUME_GAIN);
-		if (volumeGain)
-			g_volumeGainDb = static_cast<float>(volumeGain.GetNumber());
+		auto volumeLevel = jsonObj.TryLookup(CONFIG_VOLUME_LEVEL);
+		if (volumeLevel)
+			g_volumeLevelDb = static_cast<float>(volumeLevel.GetNumber());
 
 		auto lastDevices = jsonObj.Lookup(L"lastDevices").GetArray();
 		g_lastDevices.reserve(lastDevices.Size());
@@ -57,7 +57,7 @@ void SaveSettings()
 	{
 		JsonObject jsonObj;
 		jsonObj.Insert(L"reconnect", JsonValue::CreateBooleanValue(g_reconnect));
-		jsonObj.Insert(CONFIG_VOLUME_GAIN, JsonValue::CreateNumberValue(g_volumeGainDb));
+		jsonObj.Insert(CONFIG_VOLUME_LEVEL, JsonValue::CreateNumberValue(g_volumeLevelDb));
 
 		JsonArray lastDevices;
 		for (const auto& i : g_audioPlaybackConnections)

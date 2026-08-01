@@ -10,6 +10,7 @@ using namespace winrt::Windows::Media::Audio;
 using namespace winrt::Windows::UI::Xaml;
 using namespace winrt::Windows::UI::Xaml::Controls;
 using namespace winrt::Windows::UI::Xaml::Hosting;
+using namespace winrt::Windows::UI::Xaml::Media;
 namespace fs = std::filesystem;
 
 constexpr UINT WM_NOTIFYICON = WM_APP + 1;
@@ -20,8 +21,7 @@ HWND g_hWnd;
 HWND g_hWndXaml;
 Canvas g_xamlCanvas = nullptr;
 Flyout g_xamlFlyout = nullptr;
-MenuFlyout g_xamlMenu = nullptr;
-FocusState g_menuFocusState = FocusState::Unfocused;
+Flyout g_xamlMenu = nullptr;
 DevicePicker g_devicePicker = nullptr;
 std::unordered_map<std::wstring, std::pair<DeviceInformation, AudioPlaybackConnection>> g_audioPlaybackConnections;
 HICON g_hIconLight = nullptr;
@@ -38,8 +38,7 @@ NOTIFYICONIDENTIFIER g_niid = {
 UINT WM_TASKBAR_CREATED = 0;
 bool g_reconnect = false;
 std::vector<std::wstring> g_lastDevices;
-float g_volumeGainDb = 0.0f;
-VolumeBoost g_volumeBoost;
+float g_volumeLevelDb = 0.0f;
 
 #include "Util.hpp"
 #include "I18n.hpp"
