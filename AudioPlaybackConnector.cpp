@@ -434,7 +434,7 @@ void ShowMainPanel()
 
 	winrt::Windows::UI::Xaml::Controls::Primitives::FlyoutShowOptions options;
 	options.Position(point);
-	options.Placement(winrt::Windows::UI::Xaml::Controls::Primitives::PlacementMode::Top);
+	options.Placement(winrt::Windows::UI::Xaml::Controls::Primitives::FlyoutPlacementMode::Top);
 	g_mainPanel.ShowAt(g_xamlCanvas, options);
 	StartPopupWatchdog();
 }
