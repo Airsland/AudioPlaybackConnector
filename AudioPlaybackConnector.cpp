@@ -9,6 +9,7 @@ void ShowMainPanel();
 void HideAllPopups();
 void StartPopupWatchdog();
 void StopPopupWatchdog();
+void ReanchorPopupToTaskbar();
 void ShowDevicePicker();
 winrt::fire_and_forget ConnectDevice(DevicePicker, std::wstring_view);
 void SetupDevicePicker();
@@ -161,7 +162,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 				if (SUCCEEDED(Shell_NotifyIconGetRect(&g_niid, &now)) && !moved())
 					g_iconRectMisses = 0;
 				else if (++g_iconRectMisses >= 2)
-					HideAllPopups();
+					ReanchorPopupToTaskbar();
 			}
 			// If the foreground window belongs to another thread the user has
 			// clicked away; dismiss the popups even if light-dismiss never
@@ -415,15 +416,122 @@ void StartPopupWatchdog()
 		g_popupWatchdogTimer = SetTimer(g_hWnd, 1, 200, nullptr);
 }
 
-	void StopPopupWatchdog()
+void StopPopupWatchdog()
+{
+	g_trackIconRect = false;
+	g_iconRectMisses = 0;
+	if (g_popupWatchdogTimer)
 	{
-		g_trackIconRect = false;
-		g_iconRectMisses = 0;
-		if (g_popupWatchdogTimer)
-		{
 		KillTimer(g_hWnd, g_popupWatchdogTimer);
 		g_popupWatchdogTimer = 0;
 	}
+}
+
+static Point GetTaskbarAnchorPoint(winrt::Windows::UI::Xaml::Controls::Primitives::FlyoutPlacementMode& placement)
+{
+	APPBARDATA abd = {};
+	abd.cbSize = sizeof(abd);
+	UINT edge = ABE_BOTTOM;
+	if (SHAppBarMessage(ABM_GETTASKBARPOS, &abd))
+		edge = abd.uEdge;
+	else
+		abd.rc = { 0, GetSystemMetrics(SM_CYSCREEN) - 48, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN) };
+
+	auto dpi = GetDpiForWindow(g_hWnd);
+	const float scale = static_cast<float>(USER_DEFAULT_SCREEN_DPI) / static_cast<float>(dpi);
+	const float screenWidthDips = GetSystemMetrics(SM_CXSCREEN) * scale;
+	const float screenHeightDips = GetSystemMetrics(SM_CYSCREEN) * scale;
+	constexpr float kPanelHalfWidth = 135.0f;
+
+	// Anchor near the notification-area corner of the taskbar (where the
+	// overflow chevron lives), clamped to the screen so the popup stays fully
+	// visible.
+	switch (edge)
+	{
+	case ABE_TOP:
+	{
+		float x = (abd.rc.right - 90) * scale;
+		if (x < kPanelHalfWidth)
+			x = kPanelHalfWidth;
+		if (x > screenWidthDips - kPanelHalfWidth)
+			x = screenWidthDips - kPanelHalfWidth;
+		placement = winrt::Windows::UI::Xaml::Controls::Primitives::FlyoutPlacementMode::Bottom;
+		return { x, static_cast<float>(abd.rc.bottom) * scale };
+	}
+	case ABE_LEFT:
+	{
+		float y = (abd.rc.bottom - 90) * scale;
+		if (y < 100.0f)
+			y = 100.0f;
+		if (y > screenHeightDips - 100.0f)
+			y = screenHeightDips - 100.0f;
+		placement = winrt::Windows::UI::Xaml::Controls::Primitives::FlyoutPlacementMode::Right;
+		return { static_cast<float>(abd.rc.right) * scale, y };
+	}
+	case ABE_RIGHT:
+	{
+		float y = (abd.rc.bottom - 90) * scale;
+		if (y < 100.0f)
+			y = 100.0f;
+		if (y > screenHeightDips - 100.0f)
+			y = screenHeightDips - 100.0f;
+		placement = winrt::Windows::UI::Xaml::Controls::Primitives::FlyoutPlacementMode::Left;
+		return { static_cast<float>(abd.rc.left) * scale, y };
+	}
+	case ABE_BOTTOM:
+	default:
+	{
+		float x = (abd.rc.right - 90) * scale;
+		if (x < kPanelHalfWidth)
+			x = kPanelHalfWidth;
+		if (x > screenWidthDips - kPanelHalfWidth)
+			x = screenWidthDips - kPanelHalfWidth;
+		placement = winrt::Windows::UI::Xaml::Controls::Primitives::FlyoutPlacementMode::Top;
+		return { x, static_cast<float>(abd.rc.top) * scale };
+	}
+	}
+}
+
+// The tray icon may live inside the "show hidden icons" overflow popup.
+// When that popup retracts, the icon becomes hidden again, so instead of
+// dismissing our popup (or leaving it floating in mid-air), re-anchor it to
+// the taskbar so it stays attached to the notification area.
+void ReanchorPopupToTaskbar()
+{
+	using namespace winrt::Windows::UI::Xaml::Controls::Primitives;
+
+	FlyoutBase popup = nullptr;
+	if (g_mainPanel && g_mainPanel.IsOpen())
+		popup = g_mainPanel;
+	else if (g_contextMenu && g_contextMenu.IsOpen())
+		popup = g_contextMenu;
+	else if (g_xamlFlyout && g_xamlFlyout.IsOpen())
+		popup = g_xamlFlyout;
+
+	if (!popup)
+	{
+		g_trackIconRect = false;
+		g_iconRectMisses = 0;
+		return;
+	}
+
+	FlyoutPlacementMode placement = FlyoutPlacementMode::Top;
+	Point anchor = GetTaskbarAnchorPoint(placement);
+
+	HideAllPopups();
+
+	SetWindowPos(g_hWnd, nullptr, 0, 0, 0, 0, SWP_NOZORDER | SWP_HIDEWINDOW | SWP_NOSIZE);
+	SetWindowPos(g_hWndXaml, 0, 0, 0, 0, 0, SWP_NOZORDER | SWP_SHOWWINDOW);
+	SetWindowPos(g_hWnd, HWND_TOPMOST, 0, 0, 1, 1, SWP_SHOWWINDOW);
+	SetForegroundWindow(g_hWnd);
+
+	FlyoutShowOptions options;
+	options.Position(anchor);
+	options.Placement(placement);
+	popup.ShowAt(g_xamlCanvas, options);
+
+	g_trackIconRect = false;
+	g_iconRectMisses = 0;
 }
 
 void ShowMainPanel()
