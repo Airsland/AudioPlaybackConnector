@@ -5,6 +5,7 @@
 
 #include <cwchar>
 #include <string>
+#include <vector>
 
 // Volume control for the Bluetooth A2DP Sink stream.
 //
@@ -15,17 +16,19 @@
 // MMDevices registry (read-only, no hard-coded device id) and write the
 // selected level directly through IAudioEndpointVolume.
 //
-// The written value is absolute: the level chosen in the UI is exactly what
-// gets written, independent of the level the endpoint happened to have
-// before. The neutral default is 0 dB, and Reset() always writes 0 dB so a
-// previous session can never leave a non-zero level behind.
+// Every A2DP endpoint found is updated, so multiple phones connected at the
+// same time all receive the chosen level. The written value is absolute: the
+// level chosen in the UI is exactly what gets written, independent of the
+// level each endpoint happened to have before. The neutral default is 0 dB,
+// and Reset() always writes 0 dB so a previous session can never leave a
+// non-zero level behind.
 class VolumeBoost
 {
 public:
-	// Write the given level (in dB) directly to the A2DP endpoint.
+	// Write the given level (in dB) directly to every A2DP endpoint.
 	static void SetLevel(float levelDb);
 
-	// Reset the endpoint to 0 dB (neutral). Called on disconnect and exit.
+	// Reset every A2DP endpoint to 0 dB (neutral). Called on disconnect and exit.
 	static void Reset();
 };
 
@@ -47,15 +50,19 @@ static bool ContainsIgnoreCase(const wchar_t* text, const wchar_t* needle)
 	return false;
 }
 
-// Find the A2DP Sink capture endpoint id. The endpoint is hidden from the
-// audio endpoint enumeration APIs on Windows 11, but it is registered in the
-// MMDevices registry under a sub-key named after the endpoint GUID, which is
-// exactly what IMMDeviceEnumerator::GetDevice expects in short form.
-static std::wstring FindA2dpEndpointShortId()
+// Find every A2DP Sink capture endpoint id (short form). Multiple phones can
+// be connected at once, and each exposes its own "Microphone (xxx A2DP SNK)"
+// endpoint. The endpoints are hidden from the audio endpoint enumeration APIs
+// on Windows 11, but they are registered in the MMDevices registry under a
+// sub-key named after the endpoint GUID, which is exactly what
+// IMMDeviceEnumerator::GetDevice expects in short form.
+static std::vector<std::wstring> FindA2dpEndpointShortIds()
 {
+	std::vector<std::wstring> result;
+
 	HKEY hRoot = nullptr;
 	if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Capture", 0, KEY_READ, &hRoot) != ERROR_SUCCESS)
-		return {};
+		return result;
 
 	for (DWORD i = 0;; ++i)
 	{
@@ -79,40 +86,52 @@ static std::wstring FindA2dpEndpointShortId()
 		RegCloseKey(hProps);
 
 		if (result == ERROR_SUCCESS && type == REG_SZ && ContainsIgnoreCase(name, L"A2DP"))
-			return L"{0.0.1.00000000}." + std::wstring(subKeyName);
+			result.emplace_back(L"{0.0.1.00000000}." + std::wstring(subKeyName));
 	}
 
 	RegCloseKey(hRoot);
-	return {};
+	return result;
 }
 
 static bool ApplyLevel(float levelDb)
 {
-	std::wstring deviceId = FindA2dpEndpointShortId();
-	if (deviceId.empty())
+	std::vector<std::wstring> deviceIds = FindA2dpEndpointShortIds();
+	if (deviceIds.empty())
 		return false;
 
 	winrt::com_ptr<IMMDeviceEnumerator> enumerator;
 	winrt::check_hresult(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(enumerator.put())));
 
-	winrt::com_ptr<IMMDevice> device;
-	winrt::check_hresult(enumerator->GetDevice(deviceId.c_str(), device.put()));
+	for (const auto& deviceId : deviceIds)
+	{
+		try
+		{
+			winrt::com_ptr<IMMDevice> device;
+			winrt::check_hresult(enumerator->GetDevice(deviceId.c_str(), device.put()));
 
-	winrt::com_ptr<IAudioEndpointVolume> volume;
-	winrt::check_hresult(device->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr, volume.put_void()));
+			winrt::com_ptr<IAudioEndpointVolume> volume;
+			winrt::check_hresult(device->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr, volume.put_void()));
 
-	float rangeMin = 0.0f;
-	float rangeMax = 0.0f;
-	float increment = 0.0f;
-	volume->GetVolumeRange(&rangeMin, &rangeMax, &increment);
+			float rangeMin = 0.0f;
+			float rangeMax = 0.0f;
+			float increment = 0.0f;
+			volume->GetVolumeRange(&rangeMin, &rangeMax, &increment);
 
-	float target = levelDb;
-	if (target < rangeMin)
-		target = rangeMin;
-	if (target > rangeMax)
-		target = rangeMax;
+			float target = levelDb;
+			if (target < rangeMin)
+				target = rangeMin;
+			if (target > rangeMax)
+				target = rangeMax;
 
-	winrt::check_hresult(volume->SetMasterVolumeLevel(target, nullptr));
+			winrt::check_hresult(volume->SetMasterVolumeLevel(target, nullptr));
+		}
+		catch (...)
+		{
+			// One endpoint can be stale (e.g. its device just disconnected);
+			// keep applying the level to the remaining endpoints.
+		}
+	}
+
 	return true;
 }
 
