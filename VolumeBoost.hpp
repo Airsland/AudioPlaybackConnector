@@ -82,10 +82,10 @@ static std::vector<std::wstring> FindA2dpEndpointShortIds()
 		wchar_t name[1024] = {};
 		DWORD dataSize = static_cast<DWORD>(sizeof(name));
 		DWORD type = 0;
-		const LONG result = RegQueryValueExW(hProps, L"{b3f8fa53-0004-438e-9003-51a46e139bfc},6", nullptr, &type, reinterpret_cast<BYTE*>(name), &dataSize);
+		const LONG queryResult = RegQueryValueExW(hProps, L"{b3f8fa53-0004-438e-9003-51a46e139bfc},6", nullptr, &type, reinterpret_cast<BYTE*>(name), &dataSize);
 		RegCloseKey(hProps);
 
-		if (result == ERROR_SUCCESS && type == REG_SZ && ContainsIgnoreCase(name, L"A2DP"))
+		if (queryResult == ERROR_SUCCESS && type == REG_SZ && ContainsIgnoreCase(name, L"A2DP"))
 			result.emplace_back(L"{0.0.1.00000000}." + std::wstring(subKeyName));
 	}
 
