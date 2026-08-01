@@ -38,6 +38,9 @@ NOTIFYICONIDENTIFIER g_niid = {
 };
 UINT WM_TASKBAR_CREATED = 0;
 UINT_PTR g_popupWatchdogTimer = 0;
+bool g_trackIconRect = false;
+RECT g_iconRectAtOpen = {};
+int g_iconRectMisses = 0;
 bool g_reconnect = false;
 std::vector<std::wstring> g_lastDevices;
 float g_volumeBoostDb = 0.0f;

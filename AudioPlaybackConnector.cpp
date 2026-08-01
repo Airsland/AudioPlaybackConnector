@@ -142,6 +142,27 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 				StopPopupWatchdog();
 				break;
 			}
+			// The tray icon may live inside the "show hidden icons" overflow
+			// popup. That popup retracts on its own shortly after our menu
+			// opens, which would leave our window floating in mid-air. Detect
+			// it: while a popup is open the icon rect is stable; when the
+			// overflow popup closes the rect moves back to the taskbar or the
+			// lookup fails entirely, and we dismiss our popups in sync.
+			if (g_trackIconRect)
+			{
+				RECT now = {};
+				const auto moved = [&]() {
+					const LONG dx = now.left > g_iconRectAtOpen.left ? now.left - g_iconRectAtOpen.left : g_iconRectAtOpen.left - now.left;
+					const LONG dy = now.top > g_iconRectAtOpen.top ? now.top - g_iconRectAtOpen.top : g_iconRectAtOpen.top - now.top;
+					return dx > 20 || dy > 20;
+				};
+				// Require two consecutive ticks so a transient lookup glitch
+				// does not dismiss the menu.
+				if (SUCCEEDED(Shell_NotifyIconGetRect(&g_niid, &now)) && !moved())
+					g_iconRectMisses = 0;
+				else if (++g_iconRectMisses >= 2)
+					HideAllPopups();
+			}
 			// If the foreground window belongs to another thread the user has
 			// clicked away; dismiss the popups even if light-dismiss never
 			// fired. This is the safety net that keeps the menu from floating
@@ -204,6 +225,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 			SetWindowPos(g_hWnd, HWND_TOPMOST, 0, 0, 1, 1, SWP_SHOWWINDOW);
 			SetForegroundWindow(hWnd);
 
+			g_trackIconRect = SUCCEEDED(Shell_NotifyIconGetRect(&g_niid, &g_iconRectAtOpen));
 			g_contextMenu.ShowAt(g_xamlCanvas, point);
 			StartPopupWatchdog();
 		}
@@ -374,10 +396,12 @@ void ShowDevicePicker()
 	g_devicePicker.Show(rect, Placement::Above);
 }
 
-void HideAllPopups()
-{
-	if (g_mainPanel)
-		g_mainPanel.Hide();
+	void HideAllPopups()
+	{
+		g_trackIconRect = false;
+		g_iconRectMisses = 0;
+		if (g_mainPanel)
+			g_mainPanel.Hide();
 	if (g_contextMenu)
 		g_contextMenu.Hide();
 	if (g_xamlFlyout)
@@ -391,10 +415,12 @@ void StartPopupWatchdog()
 		g_popupWatchdogTimer = SetTimer(g_hWnd, 1, 200, nullptr);
 }
 
-void StopPopupWatchdog()
-{
-	if (g_popupWatchdogTimer)
+	void StopPopupWatchdog()
 	{
+		g_trackIconRect = false;
+		g_iconRectMisses = 0;
+		if (g_popupWatchdogTimer)
+		{
 		KillTimer(g_hWnd, g_popupWatchdogTimer);
 		g_popupWatchdogTimer = 0;
 	}
@@ -426,6 +452,8 @@ void ShowMainPanel()
 		px,
 		static_cast<float>(iconRect.top) * scale
 	};
+	g_trackIconRect = true;
+	g_iconRectAtOpen = iconRect;
 
 	SetWindowPos(g_hWnd, nullptr, 0, 0, 0, 0, SWP_NOZORDER | SWP_HIDEWINDOW | SWP_NOSIZE);
 	SetWindowPos(g_hWndXaml, 0, 0, 0, 0, 0, SWP_NOZORDER | SWP_SHOWWINDOW);
@@ -460,6 +488,8 @@ void ExitApp()
 	SetWindowPos(g_hWnd, HWND_TOPMOST, iconRect.left, iconRect.top, 0, 0, SWP_HIDEWINDOW);
 	g_xamlCanvas.Width(static_cast<float>((iconRect.right - iconRect.left) * USER_DEFAULT_SCREEN_DPI / dpi));
 	g_xamlCanvas.Height(static_cast<float>((iconRect.bottom - iconRect.top) * USER_DEFAULT_SCREEN_DPI / dpi));
+	g_trackIconRect = true;
+	g_iconRectAtOpen = iconRect;
 
 	g_xamlFlyout.ShowAt(g_xamlCanvas);
 	StartPopupWatchdog();
