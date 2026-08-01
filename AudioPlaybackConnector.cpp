@@ -101,6 +101,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 	switch (message)
 	{
 	case WM_DESTROY:
+		g_volumeBoost.Stop();
 		for (const auto& connection : g_audioPlaybackConnections)
 		{
 			connection.second.second.Close();
@@ -240,6 +241,43 @@ void SetupMenu()
 		winrt::Windows::System::Launcher::LaunchUriAsync(Uri(L"ms-settings:bluetooth"));
 	});
 
+	FontIcon gainIcon;
+	gainIcon.Glyph(L"\xE767");
+
+	MenuFlyoutSubItem gainItem;
+	gainItem.Text(_(L"Volume gain"));
+	gainItem.Icon(gainIcon);
+
+	const std::pair<float, const wchar_t*> gainOptions[] = {
+		{ 0.0f, L"Off" },
+		{ 3.0f, L"+3 dB" },
+		{ 6.0f, L"+6 dB" },
+		{ 9.0f, L"+9 dB" },
+		{ 12.0f, L"+12 dB" },
+	};
+	auto gainSubItem = gainItem;
+	for (const auto& option : gainOptions)
+	{
+		ToggleMenuFlyoutItem item;
+		item.Text(_(option.second));
+		item.IsChecked(g_volumeGainDb == option.first);
+		item.Click([gainSubItem, gain = option.first](const auto& sender, const auto&) {
+			auto clicked = sender.as<ToggleMenuFlyoutItem>();
+			for (auto const& i : gainSubItem.Items())
+			{
+				if (auto toggle = i.try_as<ToggleMenuFlyoutItem>())
+					toggle.IsChecked(toggle == clicked);
+			}
+			g_volumeGainDb = gain;
+			SaveSettings();
+			if (gain == 0.0f)
+				g_volumeBoost.Stop();
+			else
+				g_volumeBoost.Start(gain);
+		});
+		gainItem.Items().Append(item);
+	}
+
 	FontIcon closeIcon;
 	closeIcon.Glyph(L"\xE8BB");
 
@@ -272,6 +310,7 @@ void SetupMenu()
 
 	MenuFlyout menu;
 	menu.Items().Append(settingsItem);
+	menu.Items().Append(gainItem);
 	menu.Items().Append(exitItem);
 	menu.Opened([](const auto& sender, const auto&) {
 		auto menuItems = sender.as<MenuFlyout>().Items();
@@ -311,6 +350,8 @@ winrt::fire_and_forget ConnectDevice(DevicePicker picker, DeviceInformation devi
 					{
 						g_devicePicker.SetDisplayStatus(it->second.first, {}, DevicePickerDisplayStatusOptions::None);
 						g_audioPlaybackConnections.erase(it);
+						if (g_audioPlaybackConnections.empty())
+							g_volumeBoost.Stop();
 					}
 					sender.Close();
 				}
@@ -367,6 +408,8 @@ winrt::fire_and_forget ConnectDevice(DevicePicker picker, DeviceInformation devi
 	if (success)
 	{
 		picker.SetDisplayStatus(device, _(L"Connected"), DevicePickerDisplayStatusOptions::ShowDisconnectButton);
+		if (g_volumeGainDb != 0.0f)
+			g_volumeBoost.Start(g_volumeGainDb);
 	}
 	else
 	{
@@ -375,6 +418,8 @@ winrt::fire_and_forget ConnectDevice(DevicePicker picker, DeviceInformation devi
 		{
 			it->second.second.Close();
 			g_audioPlaybackConnections.erase(it);
+			if (g_audioPlaybackConnections.empty())
+				g_volumeBoost.Stop();
 		}
 		picker.SetDisplayStatus(device, errorMessage, DevicePickerDisplayStatusOptions::ShowRetryButton);
 	}
@@ -405,6 +450,8 @@ void SetupDevicePicker()
 		{
 			it->second.second.Close();
 			g_audioPlaybackConnections.erase(it);
+			if (g_audioPlaybackConnections.empty())
+				g_volumeBoost.Stop();
 		}
 		sender.SetDisplayStatus(device, {}, DevicePickerDisplayStatusOptions::None);
 	});
