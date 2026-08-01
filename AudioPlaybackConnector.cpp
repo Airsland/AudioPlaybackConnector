@@ -3,7 +3,12 @@
 
 LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
 void SetupFlyout();
-void SetupMenu();
+void SetupMainPanel();
+void SetupContextMenu();
+void ShowMainPanel();
+void HideAllPopups();
+void StartPopupWatchdog();
+void StopPopupWatchdog();
 void ShowDevicePicker();
 winrt::fire_and_forget ConnectDevice(DevicePicker, std::wstring_view);
 void SetupDevicePicker();
@@ -69,7 +74,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 
 	LoadSettings();
 	SetupFlyout();
-	SetupMenu();
+	SetupMainPanel();
+	SetupContextMenu();
 	SetupDevicePicker();
 	SetupSvgIcon();
 
@@ -97,6 +103,13 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 	return static_cast<int>(msg.wParam);
 }
 
+static bool AnyPopupOpen()
+{
+	return (g_mainPanel && g_mainPanel.IsOpen()) ||
+		(g_contextMenu && g_contextMenu.IsOpen()) ||
+		(g_xamlFlyout && g_xamlFlyout.IsOpen());
+}
+
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
 	switch (message)
@@ -106,16 +119,40 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 		// (user clicks elsewhere, the shell's tray overflow popup closes,
 		// etc.) dismiss any open popup and hide the window so it can never
 		// remain floating on screen.
-		if (LOWORD(wParam) == WA_INACTIVE)
+		if (LOWORD(wParam) == WA_INACTIVE && AnyPopupOpen())
+			HideAllPopups();
+		break;
+	case WM_ACTIVATEAPP:
+		// This window uses WS_EX_NOACTIVATE so it never receives
+		// WM_ACTIVATE/WA_INACTIVE itself; WM_ACTIVATEAPP is delivered to all
+		// top-level windows of this process when another app is activated and
+		// reliably covers "the user clicked somewhere else".
+		if (wParam == FALSE && AnyPopupOpen())
+			HideAllPopups();
+		break;
+	case WM_CANCELMODE:
+		if (AnyPopupOpen())
+			HideAllPopups();
+		break;
+	case WM_TIMER:
+		if (wParam == 1)
 		{
-			if (g_xamlMenu)
-				g_xamlMenu.Hide();
-			if (g_xamlFlyout)
-				g_xamlFlyout.Hide();
-			ShowWindow(g_hWnd, SW_HIDE);
+			if (!AnyPopupOpen())
+			{
+				StopPopupWatchdog();
+				break;
+			}
+			// If the foreground window belongs to another thread the user has
+			// clicked away; dismiss the popups even if light-dismiss never
+			// fired. This is the safety net that keeps the menu from floating
+			// on the desktop after the tray overflow popup collapses.
+			HWND fg = GetForegroundWindow();
+			if (!fg || GetWindowThreadProcessId(fg, nullptr) != GetCurrentThreadId())
+				HideAllPopups();
 		}
 		break;
 	case WM_DESTROY:
+		StopPopupWatchdog();
 		g_volumeBoostMgr.Stop();
 		{
 			// Move the map out first: closing a connection can fire
@@ -144,7 +181,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 		{
 		case NIN_SELECT:
 		case NIN_KEYSELECT:
-			ShowDevicePicker();
+			ShowMainPanel();
 			break;
 		case WM_CONTEXTMENU:
 		{
@@ -167,9 +204,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 			SetWindowPos(g_hWnd, HWND_TOPMOST, 0, 0, 1, 1, SWP_SHOWWINDOW);
 			SetForegroundWindow(hWnd);
 
-			winrt::Windows::UI::Xaml::Controls::Primitives::FlyoutShowOptions options;
-			options.Position(point);
-			g_xamlMenu.ShowAt(g_xamlCanvas, options);
+			g_contextMenu.ShowAt(g_xamlCanvas, point);
+			StartPopupWatchdog();
 		}
 		break;
 		}
@@ -338,7 +374,130 @@ void ShowDevicePicker()
 	g_devicePicker.Show(rect, Placement::Above);
 }
 
-void SetupMenu()
+void HideAllPopups()
+{
+	if (g_mainPanel)
+		g_mainPanel.Hide();
+	if (g_contextMenu)
+		g_contextMenu.Hide();
+	if (g_xamlFlyout)
+		g_xamlFlyout.Hide();
+	ShowWindow(g_hWnd, SW_HIDE);
+}
+
+void StartPopupWatchdog()
+{
+	if (!g_popupWatchdogTimer)
+		g_popupWatchdogTimer = SetTimer(g_hWnd, 1, 200, nullptr);
+}
+
+void StopPopupWatchdog()
+{
+	if (g_popupWatchdogTimer)
+	{
+		KillTimer(g_hWnd, g_popupWatchdogTimer);
+		g_popupWatchdogTimer = 0;
+	}
+}
+
+void ShowMainPanel()
+{
+	RECT iconRect;
+	auto hr = Shell_NotifyIconGetRect(&g_niid, &iconRect);
+	if (FAILED(hr))
+	{
+		LOG_HR(hr);
+		return;
+	}
+
+	auto dpi = GetDpiForWindow(g_hWnd);
+	const float scale = static_cast<float>(USER_DEFAULT_SCREEN_DPI) / static_cast<float>(dpi);
+	constexpr float kPanelHalfWidth = 135.0f;
+
+	// Anchor the panel above the tray icon and keep it on screen.
+	float px = ((iconRect.left + iconRect.right) / 2.0f) * scale;
+	if (px < kPanelHalfWidth)
+		px = kPanelHalfWidth;
+	const float screenWidthDips = GetSystemMetrics(SM_CXSCREEN) * scale;
+	if (px > screenWidthDips - kPanelHalfWidth)
+		px = screenWidthDips - kPanelHalfWidth;
+
+	Point point = {
+		px,
+		static_cast<float>(iconRect.top) * scale
+	};
+
+	SetWindowPos(g_hWnd, nullptr, 0, 0, 0, 0, SWP_NOZORDER | SWP_HIDEWINDOW | SWP_NOSIZE);
+	SetWindowPos(g_hWndXaml, 0, 0, 0, 0, 0, SWP_NOZORDER | SWP_SHOWWINDOW);
+	SetWindowPos(g_hWnd, HWND_TOPMOST, 0, 0, 1, 1, SWP_SHOWWINDOW);
+	SetForegroundWindow(g_hWnd);
+
+	winrt::Windows::UI::Xaml::Controls::Primitives::FlyoutShowOptions options;
+	options.Position(point);
+	options.Placement(winrt::Windows::UI::Xaml::Controls::Primitives::PlacementMode::Top);
+	g_mainPanel.ShowAt(g_xamlCanvas, options);
+	StartPopupWatchdog();
+}
+
+void ExitApp()
+{
+	if (g_audioPlaybackConnections.size() == 0)
+	{
+		PostMessageW(g_hWnd, WM_CLOSE, 0, 0);
+		return;
+	}
+
+	RECT iconRect;
+	auto hr = Shell_NotifyIconGetRect(&g_niid, &iconRect);
+	if (FAILED(hr))
+	{
+		LOG_HR(hr);
+		return;
+	}
+
+	auto dpi = GetDpiForWindow(g_hWnd);
+
+	SetWindowPos(g_hWnd, HWND_TOPMOST, iconRect.left, iconRect.top, 0, 0, SWP_HIDEWINDOW);
+	g_xamlCanvas.Width(static_cast<float>((iconRect.right - iconRect.left) * USER_DEFAULT_SCREEN_DPI / dpi));
+	g_xamlCanvas.Height(static_cast<float>((iconRect.bottom - iconRect.top) * USER_DEFAULT_SCREEN_DPI / dpi));
+
+	g_xamlFlyout.ShowAt(g_xamlCanvas);
+	StartPopupWatchdog();
+}
+
+void SetupContextMenu()
+{
+	FontIcon settingsIcon;
+	settingsIcon.Glyph(L"\xE713");
+
+	MenuFlyoutItem settingsItem;
+	settingsItem.Text(_(L"Bluetooth Settings"));
+	settingsItem.Icon(settingsIcon);
+	settingsItem.Click([](const auto&, const auto&) {
+		winrt::Windows::System::Launcher::LaunchUriAsync(Uri(L"ms-settings:bluetooth"));
+	});
+
+	FontIcon closeIcon;
+	closeIcon.Glyph(L"\xE8BB");
+
+	MenuFlyoutItem exitItem;
+	exitItem.Text(_(L"Exit"));
+	exitItem.Icon(closeIcon);
+	exitItem.Click([](const auto&, const auto&) {
+		ExitApp();
+	});
+
+	MenuFlyout menu;
+	menu.Items().Append(settingsItem);
+	menu.Items().Append(exitItem);
+	menu.Closed([](const auto&, const auto&) {
+		ShowWindow(g_hWnd, SW_HIDE);
+	});
+
+	g_contextMenu = menu;
+}
+
+void SetupMainPanel()
 {
 	const bool light = IsLightTheme();
 
@@ -425,14 +584,12 @@ void SetupMenu()
 	});
 
 	auto connectButton = MakeMenuRow(_(L"Connect device"), L"\xE720", hoverBrush, [](const auto&, const auto&) {
-		if (g_xamlMenu)
-			g_xamlMenu.Hide();
+		HideAllPopups();
 		ShowDevicePicker();
 	});
 
 	auto settingsButton = MakeMenuRow(_(L"Bluetooth settings"), L"\xE713", hoverBrush, [](const auto&, const auto&) {
-		if (g_xamlMenu)
-			g_xamlMenu.Hide();
+		HideAllPopups();
 		winrt::Windows::System::Launcher::LaunchUriAsync(Uri(L"ms-settings:bluetooth"));
 	});
 
@@ -445,27 +602,7 @@ void SetupMenu()
 	});
 
 	auto exitButton = MakeMenuRow(_(L"Exit"), L"\xE8BB", hoverBrush, [](const auto&, const auto&) {
-		if (g_audioPlaybackConnections.size() == 0)
-		{
-			PostMessageW(g_hWnd, WM_CLOSE, 0, 0);
-			return;
-		}
-
-		RECT iconRect;
-		auto hr = Shell_NotifyIconGetRect(&g_niid, &iconRect);
-		if (FAILED(hr))
-		{
-			LOG_HR(hr);
-			return;
-		}
-
-		auto dpi = GetDpiForWindow(g_hWnd);
-
-		SetWindowPos(g_hWnd, HWND_TOPMOST, iconRect.left, iconRect.top, 0, 0, SWP_HIDEWINDOW);
-		g_xamlCanvas.Width(static_cast<float>((iconRect.right - iconRect.left) * USER_DEFAULT_SCREEN_DPI / dpi));
-		g_xamlCanvas.Height(static_cast<float>((iconRect.bottom - iconRect.top) * USER_DEFAULT_SCREEN_DPI / dpi));
-
-		g_xamlFlyout.ShowAt(g_xamlCanvas);
+		ExitApp();
 	});
 
 	auto makeSeparator = [borderBrush]() {
@@ -508,7 +645,7 @@ void SetupMenu()
 		ShowWindow(g_hWnd, SW_HIDE);
 	});
 
-	g_xamlMenu = flyout;
+	g_mainPanel = flyout;
 
 	wchar_t buf[32] = {};
 	swprintf(buf, 32, L"%+.1f dB", static_cast<double>(g_volumeBoostDb));
@@ -661,9 +798,6 @@ void SetupDevicePicker()
 				g_volumeBoostMgr.Stop();
 		}
 		sender.SetDisplayStatus(device, {}, DevicePickerDisplayStatusOptions::None);
-		// Dismiss the picker and hide the helper window so the app cannot
-		// stay stuck in the foreground after disconnecting.
-		SetWindowPos(g_hWnd, nullptr, 0, 0, 0, 0, SWP_NOZORDER | SWP_HIDEWINDOW);
 	});
 }
 
